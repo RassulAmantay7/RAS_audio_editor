@@ -429,6 +429,88 @@ def mp4_input_trim(media_time: int, seg_dur: int, mvhd_ts: int, mdhd_ts: int,
     return dict(skip=0, length=stts_total, source='none')
 
 
+
+# ---------------------------------------------------------------------------
+# FR-32. Цикл выделения. Поставщик пишет в AudioTrack блоками; позиция рендера
+# pos перескакивает на start в момент pos == end ВНУТРИ блока (без тишины и
+# сглаживания). Журнал сегментов (w0, p0, n) связывает номер записанного кадра
+# AudioTrack с позицией рендера -> курсор без накопленной ошибки.
+# ---------------------------------------------------------------------------
+def loop_fill(pos: int, start: int, end: int, nframes: int):
+    """Возвращает (новый pos, [(p0, n)] — куски рендера, которыми заполнен блок)."""
+    assert 0 <= start < end
+    if not (start <= pos < end):          # курсор вне выделения -> к началу
+        pos = start
+    out = []
+    while nframes > 0:
+        n = min(nframes, end - pos)
+        out.append((pos, n)); nframes -= n; pos += n
+        if pos == end:
+            pos = start
+    return pos, out
+
+
+def loop_stream(start, end, total, block, changes=()):
+    """Эталон потока индексов рендера. changes: [(written_frame, new_start, new_end)] —
+    применяются перед блоком, начинающимся с written >= written_frame."""
+    pos, w, idx, seg_log = start, 0, [], []
+    ch = sorted(changes)
+    while w < total:
+        while ch and ch[0][0] <= w:
+            _, start, end = ch.pop(0)
+        pos, pieces = loop_fill(pos, start, end, min(block, total - w))
+        for p0, n in pieces:
+            seg_log.append((w, p0, n)); idx.extend(range(p0, p0 + n)); w += n
+    return idx, seg_log
+
+
+def cursor_from_timestamp(seg_log, frame_pos: int, ts_nanos: int, now_nanos: int, fs: int):
+    """AudioTimestamp(framePosition, nanoTime): сейчас звучит кадр
+    F = frame_pos + round((now-ts)*fs/1e9). Позиция рендера — по журналу сегментов."""
+    F = frame_pos + ((now_nanos - ts_nanos) * fs + 500_000_000) // 1_000_000_000
+    for w0, p0, n in reversed(seg_log):
+        if w0 <= F < w0 + n:
+            return p0 + (F - w0)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# FR-33. Автопроверка. FLAC MD5 (RFC 9639 §8.2, STREAMINFO): MD5 от
+# знаковых сэмплов, чередование каналов, little-endian, ширина ceil(bps/8) байт.
+# ---------------------------------------------------------------------------
+import hashlib
+
+
+def flac_md5(pcm_int: np.ndarray, bps: int) -> str:
+    """pcm_int: int [L, C]."""
+    w = (bps + 7) // 8
+    a = pcm_int.astype('<i4').reshape(-1)
+    b = a.view(np.uint8).reshape(-1, 4)[:, :w]
+    return hashlib.md5(b.tobytes()).hexdigest()
+
+
+def float_to_int24_exact(f32: np.ndarray) -> np.ndarray:
+    """Обратное к декодеру с выходом float (int24 / 2^23): точно, 24 бита мантиссы."""
+    v = f32.astype(np.float64) * 8388608.0
+    assert np.all(v == np.round(v))
+    return v.astype(np.int32)
+
+
+def verify_length(kind: str, n_dec: int, n_exp: int, frame: int = 0, fallback=False):
+    if kind in ('wav', 'flac'):
+        tol = 0
+    elif kind in ('aac', 'opus'):
+        tol = frame if fallback else 1
+    else:                       # как есть / быстрая обрезка: длительность
+        tol = frame
+    return abs(n_dec - n_exp) <= tol, tol
+
+
+def bitrate_check(size_bytes: int, n: int, fs: int, target_bps: int, tol=0.15):
+    avg = size_bytes * 8 * fs / n
+    dev = avg / target_bps - 1.0
+    return dict(avg_bps=round(avg), deviation=round(dev, 4), warn=abs(dev) > tol)
+
 # ---------------------------------------------------------------------------
 # Самопроверка и векторы
 # ---------------------------------------------------------------------------
@@ -622,6 +704,55 @@ def selfcheck():
                        **mp4_input_trim(2112, 441000, 44100, 44100, 444 * 1024)),
     )
     assert V['fr26']['mp4_ffmpeg_ms']['length'] == 45100
+
+    # FR-32
+    idx, log = loop_stream(48000, 96000, 5 * 48000, 4096)
+    assert len(idx) == 240000
+    assert all(idx[i] == 48000 + i % 48000 for i in range(len(idx)))
+    i = idx.index(95999); assert idx[i + 1] == 48000
+    for blk in (1, 7, 48000, 100000):
+        assert loop_stream(48000, 96000, 5 * 48000, blk)[0] == idx
+    idx1, _ = loop_stream(10, 11, 5, 3); assert idx1 == [10] * 5          # цикл 1 сэмпл
+    idx3, _ = loop_stream(0, 3, 8, 5); assert idx3 == [0, 1, 2, 0, 1, 2, 0, 1]
+    # смена конца во время воспроизведения: после 1000 кадров конец 600 -> pos 1000>=600 -> к началу
+    idxc, logc = loop_stream(0, 2000, 1600, 500, changes=[(1000, 0, 600)])
+    assert idxc[:1000] == list(range(1000)) and idxc[1000:1600] == list(range(600))
+    # pos вне нового выделения слева (начало сдвинуто за курсор) -> к новому началу
+    idxd, _ = loop_stream(0, 2000, 1200, 500, changes=[(500, 800, 1000)])
+    assert idxd[500:700] == list(range(800, 1000)) and idxd[700:900] == list(range(800, 1000))
+    # курсор: 60 проходов цикла 1,000 с при 48 кГц, задержка 0 после 59,5 c
+    _, log60 = loop_stream(48000, 96000, 61 * 48000, 960)
+    c = cursor_from_timestamp(log60, 59 * 48000, 0, 500_000_000, 48000)
+    assert c == 48000 + 24000
+    V['fr32_loop'] = dict(
+        main=dict(start=48000, end=96000, passes=5, total=240000, rule='out[i] = 48000 + i mod 48000',
+                  block_sizes_equal=[1, 7, 4096, 48000, 100000]),
+        one_sample=dict(start=10, end=11, total=5, block=3, out=idx1),
+        three=dict(start=0, end=3, total=8, block=5, out=idx3),
+        change_end=dict(start=0, end=2000, total=1600, block=500, change=[1000, 0, 600],
+                        rule='out[0:1000]=0..999, out[1000:1600]=0..599'),
+        change_start=dict(start=0, end=2000, total=1200, block=500, change=[500, 800, 1000],
+                          rule='out[500:700]=800..999, out[700:900]=800..999, out[900:1100]=800..999'),
+        cursor=dict(start=48000, end=96000, block=960, frame_pos=59 * 48000, ts_nanos=0,
+                    now_nanos=500_000_000, fs=48000, render_pos=72000))
+
+    # FR-33: MD5 FLAC
+    q16 = (test_signal(4800) * F32(32767)).astype(np.int32)        # точные целые
+    q24 = (test_signal(4800).astype(np.float64) * 8388607).round().astype(np.int32)
+    md16, md24 = flac_md5(q16, 16), flac_md5(q24, 24)
+    f24 = (q24.astype(np.float64) / 8388608.0).astype(F32)
+    assert np.array_equal(float_to_int24_exact(f24), q24)
+    V['fr33_flac_md5'] = [
+        dict(signal='(int) float32(edit_signal * 32767f) — усечение к нулю, int16, L=4800, C=2', bps=16, md5=md16),
+        dict(signal='rint(double(edit_signal) * 8388607) (half-even) -> int24, L=4800, C=2', bps=24, md5=md24),
+        dict(signal='тишина int16, L=0, C=2', bps=16, md5=hashlib.md5(b'').hexdigest())]
+    V['fr33_tolerances'] = dict(wav=0, flac=0, aac=1, opus=1, aac_fallback='1 кадр (1024; HE 2048)',
+                                opus_fallback='1 пакет (обычно 960 @48k)', as_is='пакеты 1:1; длительность ±1 кадр')
+    V['fr33_bitrate'] = [dict(size=45_000_000, n=1800 * 48000, fs=48000, target=192000,
+                              **bitrate_check(45_000_000, 1800 * 48000, 48000, 192000)),
+                         dict(size=32_000_000, n=1800 * 48000, fs=48000, target=192000,
+                              **bitrate_check(32_000_000, 1800 * 48000, 48000, 192000))]
+    assert V['fr33_bitrate'][0]['warn'] is False and V['fr33_bitrate'][1]['warn'] is True
     return V
 
 
@@ -646,6 +777,28 @@ def ffmpeg_check():
     print('Ожидание (ffmpeg 6.1): m4a — НЕ обрезан хвост (46080 при 44,1 кГц), ogg 48100 / 49089, mp3 = L.')
 
 
+def ffmpeg_flac_md5_check():
+    """Сверка flac_md5 с STREAMINFO, записанным эталонным энкодером ffmpeg."""
+    td = tempfile.mkdtemp(); res = {}
+    for bps, scale in ((16, 32767), (24, 8388607)):
+        x = test_signal(4800)
+        q = (x * F32(32767)).astype(np.int32) if bps == 16 else \
+            (x.astype(np.float64) * scale).round().astype(np.int32)
+        raw = os.path.join(td, f'q{bps}.raw'); fl = os.path.join(td, f'q{bps}.flac')
+        w = bps // 8
+        open(raw, 'wb').write(q.astype('<i4').reshape(-1).view(np.uint8).reshape(-1, 4)[:, :w].tobytes())
+        fmt = 's16le' if bps == 16 else 's24le'
+        sf = 's16' if bps == 16 else 's32'
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', fmt, '-ar', '48000', '-ac', '2', '-i', raw,
+                        '-c:a', 'flac', '-sample_fmt', sf, '-bits_per_raw_sample', str(bps), fl], check=True)
+        d = open(fl, 'rb').read()
+        si = d[8:8 + 34]
+        tot = ((si[13] & 0x0F) << 32) | struct.unpack('>I', si[14:18])[0]
+        res[bps] = dict(streaminfo_md5=si[18:34].hex(), ours=flac_md5(q, bps), total_samples=tot)
+        assert res[bps]['streaminfo_md5'] == res[bps]['ours'] and tot == 4800, res
+    print('FLAC MD5 == STREAMINFO (ffmpeg):', json.dumps(res))
+
+
 if __name__ == '__main__':
     V = selfcheck()
     print('selfcheck OK')
@@ -658,3 +811,4 @@ if __name__ == '__main__':
         print('written', os.path.join(OUT, 'timeline_vectors.json'))
     if '--ffmpeg' in sys.argv:
         ffmpeg_check()
+        ffmpeg_flac_md5_check()

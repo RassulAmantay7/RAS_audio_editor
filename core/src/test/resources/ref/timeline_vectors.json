@@ -939,5 +939,130 @@
    "length": 441000,
    "source": "elst"
   }
- }
+ },
+ "fr32_loop": {
+  "main": {
+   "start": 48000,
+   "end": 96000,
+   "passes": 5,
+   "total": 240000,
+   "rule": "out[i] = 48000 + i mod 48000",
+   "block_sizes_equal": [
+    1,
+    7,
+    4096,
+    48000,
+    100000
+   ]
+  },
+  "one_sample": {
+   "start": 10,
+   "end": 11,
+   "total": 5,
+   "block": 3,
+   "out": [
+    10,
+    10,
+    10,
+    10,
+    10
+   ]
+  },
+  "three": {
+   "start": 0,
+   "end": 3,
+   "total": 8,
+   "block": 5,
+   "out": [
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1
+   ]
+  },
+  "change_end": {
+   "start": 0,
+   "end": 2000,
+   "total": 1600,
+   "block": 500,
+   "change": [
+    1000,
+    0,
+    600
+   ],
+   "rule": "out[0:1000]=0..999, out[1000:1600]=0..599"
+  },
+  "change_start": {
+   "start": 0,
+   "end": 2000,
+   "total": 1200,
+   "block": 500,
+   "change": [
+    500,
+    800,
+    1000
+   ],
+   "rule": "out[500:700]=800..999, out[700:900]=800..999, out[900:1100]=800..999"
+  },
+  "cursor": {
+   "start": 48000,
+   "end": 96000,
+   "block": 960,
+   "frame_pos": 2832000,
+   "ts_nanos": 0,
+   "now_nanos": 500000000,
+   "fs": 48000,
+   "render_pos": 72000
+  }
+ },
+ "fr33_flac_md5": [
+  {
+   "signal": "(int) float32(edit_signal * 32767f) — усечение к нулю, int16, L=4800, C=2",
+   "bps": 16,
+   "md5": "01bd03cc62bc6d6482dc96a42a6db498"
+  },
+  {
+   "signal": "rint(double(edit_signal) * 8388607) (half-even) -> int24, L=4800, C=2",
+   "bps": 24,
+   "md5": "7ef2647fbfcb8e08b25b8c1a494c5d45"
+  },
+  {
+   "signal": "тишина int16, L=0, C=2",
+   "bps": 16,
+   "md5": "d41d8cd98f00b204e9800998ecf8427e"
+  }
+ ],
+ "fr33_tolerances": {
+  "wav": 0,
+  "flac": 0,
+  "aac": 1,
+  "opus": 1,
+  "aac_fallback": "1 кадр (1024; HE 2048)",
+  "opus_fallback": "1 пакет (обычно 960 @48k)",
+  "as_is": "пакеты 1:1; длительность ±1 кадр"
+ },
+ "fr33_bitrate": [
+  {
+   "size": 45000000,
+   "n": 86400000,
+   "fs": 48000,
+   "target": 192000,
+   "avg_bps": 200000,
+   "deviation": 0.0417,
+   "warn": false
+  },
+  {
+   "size": 32000000,
+   "n": 86400000,
+   "fs": 48000,
+   "target": 192000,
+   "avg_bps": 142222,
+   "deviation": -0.2593,
+   "warn": true
+  }
+ ]
 }
