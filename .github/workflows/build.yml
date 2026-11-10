@@ -1,0 +1,101 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install ffmpeg and flac (reference tools for :core tests)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg flac > /dev/null && ffmpeg -version | head -1 && flac --version
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::Секрет SIGNING_KEYSTORE_BASE64 не задан — APK подписан отладочным ключом. Обновление поверх прошлой версии может не установиться."
+            exit 0
+          fi
+          # Убираем пробелы и переносы строк, которые могли попасть при копировании.
+          printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n\t' > "$RUNNER_TEMP/ks.b64"
+          echo "Длина base64 после очистки: $(wc -c < "$RUNNER_TEMP/ks.b64") символов (ожидается 5736)"
+          if ! base64 -d "$RUNNER_TEMP/ks.b64" > "$RUNNER_TEMP/release.jks"; then
+            echo "::error::Секрет SIGNING_KEYSTORE_BASE64 повреждён: вставьте заново ВСЁ содержимое keystore-base64.txt (одна строка, 5736 символов)."
+            exit 1
+          fi
+          if ! keytool -list -keystore "$RUNNER_TEMP/release.jks" -storetype PKCS12 -storepass "$SIGNING_STORE_PASSWORD" -alias "$SIGNING_KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::Ключ не открывается: проверьте секреты SIGNING_STORE_PASSWORD и SIGNING_KEY_ALIAS (без пробелов и кавычек) и что keystore-base64.txt скопирован целиком."
+            exit 1
+          fi
+          echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          echo "Подпись: личный ключ из секретов — OK"
+
+      - name: Unit tests (core)
+        env:
+          REQUIRE_TOOLS: '1'
+        run: gradle --no-daemon :core:test
+
+      - name: Build release APK
+        env:
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease
+
+      - name: Check — permissions (NFR-3)
+        run: |
+          AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)aapt2
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          "$AAPT2" dump permissions "$APK" | tee perms.txt
+          if grep -q "android.permission.INTERNET" perms.txt; then
+            echo "::error::В APK попало разрешение INTERNET"; exit 1
+          fi
+          grep -oE "uses-permission: name='[^']*'|permission: [a-zA-Z0-9_.]+" perms.txt | sed -E "s/.*name='([^']*)'.*/\1/; s/^permission: //" | sort -u > got.txt
+          printf '%s\n' android.permission.FOREGROUND_SERVICE android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING android.permission.POST_NOTIFICATIONS > want.txt
+          if ! diff <(grep '^android.permission' got.txt) want.txt; then
+            echo "::error::Набор разрешений отличается от NFR-3"; exit 1
+          fi
+          mkdir -p dist && cp "$APK" dist/RASAudioEditor.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RASAudioEditor-apk
+          path: dist/RASAudioEditor.apk
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: core/build/reports/tests/
+
+      - name: Publish "latest" release (download from phone)
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Последняя сборка' }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          files: dist/RASAudioEditor.apk
+          body: "Сборка из коммита ${{ github.sha }}. Скачайте RASAudioEditor.apk на телефон и установите."

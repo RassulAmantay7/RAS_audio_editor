@@ -1,0 +1,15 @@
+.gradle/
+build/
+local.properties
+*.keystore
+*.jks
+.idea/
+/out/
+signing-key-*/
+*.zip
+*.apk
+*.aab
+keystore-base64.txt
+README-КЛЮЧ.txt
+.DS_Store
+Thumbs.db

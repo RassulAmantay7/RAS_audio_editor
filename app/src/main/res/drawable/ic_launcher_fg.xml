@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Иконка: волна звука из вертикальных полос. Холст 108x108, безопасная зона 66x66. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FF5EE0C2" android:pathData="M33,49 h4 a2,2 0 0 1 2,2 v6 a2,2 0 0 1 -2,2 h-4 a2,2 0 0 1 -2,-2 v-6 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#FF5EE0C2" android:pathData="M43,40 h4 a2,2 0 0 1 2,2 v24 a2,2 0 0 1 -2,2 h-4 a2,2 0 0 1 -2,-2 v-24 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#FFB4F5E6" android:pathData="M53,32 h4 a2,2 0 0 1 2,2 v40 a2,2 0 0 1 -2,2 h-4 a2,2 0 0 1 -2,-2 v-40 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#FF5EE0C2" android:pathData="M63,42 h4 a2,2 0 0 1 2,2 v20 a2,2 0 0 1 -2,2 h-4 a2,2 0 0 1 -2,-2 v-20 a2,2 0 0 1 2,-2 z" />
+    <path android:fillColor="#FF5EE0C2" android:pathData="M73,47 h4 a2,2 0 0 1 2,2 v10 a2,2 0 0 1 -2,2 h-4 a2,2 0 0 1 -2,-2 v-10 a2,2 0 0 1 2,-2 z" />
+</vector>
