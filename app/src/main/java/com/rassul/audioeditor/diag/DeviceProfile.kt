@@ -51,6 +51,17 @@ class DeviceProfile private constructor(ctx: Context) {
         sp.edit().apply { if (frames == null) remove(K_DROPS + mime.lowercase()) else putLong(K_DROPS + mime.lowercase(), frames) }.apply()
     }
 
+    /**
+     * Изменение хвоста системным декодером [mime] (кадры выхода; tail из DecoderDropCalibration, аудит T21 п. 3):
+     * > 0 — сам обрезает в конце, < 0 — дописывает (MP3). null — не калибровалось (без поправки).
+     */
+    fun decoderTailFramesOrNull(mime: String): Long? =
+        if (sp.contains(K_TAIL + mime.lowercase())) sp.getLong(K_TAIL + mime.lowercase(), 0L) else null
+
+    fun setDecoderTailFrames(mime: String, frames: Long?) {
+        sp.edit().apply { if (frames == null) remove(K_TAIL + mime.lowercase()) else putLong(K_TAIL + mime.lowercase(), frames) }.apply()
+    }
+
     /** Все калибровки — для отчёта самопроверки. */
     fun describe(): String = buildString {
         append("MediaMuxer для AAC: ").append(if (useMediaMuxerForAac) "да" else "нет").append('\n')
@@ -58,6 +69,7 @@ class DeviceProfile private constructor(ctx: Context) {
         append("Задержка энкодера AAC: ").append(encoderDelayAac?.toString() ?: "из формата").append('\n')
         append("Задержка энкодера Opus: ").append(encoderDelayOpus?.toString() ?: "из OpusHead").append('\n')
         for ((k, v) in sp.all) if (k.startsWith(K_DROPS)) append("Декодер ${k.removePrefix(K_DROPS)} сам отбрасывает: $v\n")
+        for ((k, v) in sp.all) if (k.startsWith(K_TAIL)) append("Декодер ${k.removePrefix(K_TAIL)} меняет хвост на: ${-(v as Long)}\n")
     }
 
     // ---------------------------------------------------------------- журнал
@@ -83,6 +95,7 @@ class DeviceProfile private constructor(ctx: Context) {
         private const val K_DELAY_OPUS = "delay_opus"
         private const val K_FLOAT_ENC = "float_enc"
         private const val K_DROPS = "drops:"
+        private const val K_TAIL = "tail:"
 
         @Volatile private var inst: DeviceProfile? = null
         fun get(ctx: Context): DeviceProfile = inst ?: synchronized(this) { inst ?: DeviceProfile(ctx).also { inst = it } }

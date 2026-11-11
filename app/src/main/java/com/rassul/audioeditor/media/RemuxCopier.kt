@@ -272,11 +272,12 @@ object RemuxCopier {
                 val inRate = head?.takeIf { it.size >= 16 }?.u32le(12)?.toInt()?.takeIf { it > 0 } ?: track.sampleRate
                 val w = OggOpusWriter(sink, track.channels, inRate, pre)
                 if (head != null && head.size >= 21 && head.u8(18) != 0) w.channelMapping = head.copyOfRange(19, minOf(head.size, 21 + track.channels))
-                var total = 0L
-                forEachPacket(src, track, kind, progress) { p -> w.writePacket(p.data, 0, p.len, p.frames); total += p.frames; c.add(p.data, p.len) }
+                var total = 0L; var lastF = 0
+                forEachPacket(src, track, kind, progress) { p -> w.writePacket(p.data, 0, p.len, p.frames); total += p.frames; lastF = p.frames; c.add(p.data, p.len) }
                 val valid = maxOf(0L, total - pre - (g.info?.paddingFrames ?: 0L))
                 w.finish(valid)
-                return c.result(ext, valid, 48000, 960)
+                // Допуск длины — по последнему пакету (аудит T21 п. 9).
+                return c.result(ext, valid, 48000, com.rassul.audioeditor.core.pipeline.LengthTolerance.opusFrame(lastF))
             }
             Kind.MP3 -> {
                 // Сырой .mp3: кадр Info/LAME источника (если был) копируется как есть, затем аудиокадры.
@@ -505,9 +506,10 @@ object RemuxCopier {
             Kind.OPUS -> {
                 val inRate = GaplessResolver.csd(track.format, "csd-0")?.let { b -> GaplessResolver.indexOf(b, "OpusHead").takeIf { it >= 0 && b.size >= it + 16 }?.let { b.u32le(it + 12).toInt() } } ?: track.sampleRate
                 val w = OggOpusWriter(sink, track.channels, inRate, plan.hidden.toInt())   // pre-skip = hidden (RFC 7845 §4.2)
-                forEachPacket(src, track, kind, progress) { pk -> inRange(pk) { p -> w.writePacket(p.data, 0, p.len, p.frames); c.add(p.data, p.len) } }
+                var lastF = 0
+                forEachPacket(src, track, kind, progress) { pk -> inRange(pk) { p -> w.writePacket(p.data, 0, p.len, p.frames); lastF = p.frames; c.add(p.data, p.len) } }
                 w.finish(n)
-                return c.result(ext, n, 48000, 960, preview.message)
+                return c.result(ext, n, 48000, com.rassul.audioeditor.core.pipeline.LengthTolerance.opusFrame(lastF), preview.message)
             }
             Kind.MP3 -> {
                 // Кадр Info/LAME: delay = hidden − 529, padding = K·spf − delay − (B − A) (timeline.md «FR-23, MP3»).

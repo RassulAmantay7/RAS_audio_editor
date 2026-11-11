@@ -18,11 +18,13 @@ object AppSim {
         metaRate: Int = 48000, outRate: Int = 48000, block: Int = 1024,
         /** Хвост, переданный в GaplessTrimmer (по умолчанию = фактический [pad]). */
         metaPad: Long = pad,
+        /** Калибровка хвоста декодера X_t из DeviceProfile (DecoderTrim.plan calibratedTail); null — нет. */
+        calibratedTail: Long? = null,
     ): Out {
         val rawImpulse = delay + impulse
         val decLen = delay + length + pad - headDrop - tailDrop
         val decImpulse = rawImpulse - headDrop
-        val p = DecoderTrim.plan(delay, metaPad, metaRate, outRate, calibrated, wholeDelayByDefault)
+        val p = DecoderTrim.plan(delay, metaPad, metaRate, outRate, calibrated, wholeDelayByDefault, calibratedTail)
         val tr = GaplessTrimmer(p.delay, p.padding, p.decoderDrops, null)
         var pos = 0L
         var emitted = 0L

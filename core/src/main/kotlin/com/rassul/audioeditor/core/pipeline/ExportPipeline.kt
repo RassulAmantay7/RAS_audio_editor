@@ -39,10 +39,50 @@ interface EncodedPacketSink {
     fun finish(encoderDelay: Int, validFrames: Long)
 }
 
-/** Адаптер к .m4a: задержка → elst.media_time (ISO/IEC 14496-12 §8.6.6), длина → segment_duration. */
-class Mp4PacketSink(val writer: Mp4AacWriter) : EncodedPacketSink {
-    override fun writePacket(data: ByteArray, off: Int, len: Int, frames: Int) = writer.writePacket(data, off, len)
-    override fun finish(encoderDelay: Int, validFrames: Long) = writer.finish(encoderDelay, validFrames)
+/**
+ * Удержание хвостовых пакетов энкодера (аудит устройства: c2.android.aac.encoder выдаёт на пакет больше, а Opus без
+ * дополнительной тишины — меньше; энкодер в :app подаёт перед EOS тишину delay + кадр). Последние ≥ [holdbackFrames]
+ * кадров пакетов держатся в памяти; в [finish] записываются только пакеты, пока их сумма не покроет delay + N
+ * (K = ⌈(delay + N)/F⌉ для AAC — условие Mp4Timing; Ogg — гранула конца preSkip + N ≤ Σ, RFC 7845 §4.4).
+ * Остальное — заполнение после конца сигнала, отбрасывается. Пакетов не хватает — решает писатель (ошибка).
+ */
+class TailPacketHoldback(private val holdbackFrames: Long, private val out: (ByteArray, Int) -> Unit) {
+    private val q = ArrayDeque<Pair<ByteArray, Int>>()
+    private var qFrames = 0L
+    /** Кадров в уже отданных писателю пакетах. */
+    var writtenFrames = 0L; private set
+
+    fun add(data: ByteArray, off: Int, len: Int, frames: Int) {
+        q.addLast(data.copyOfRange(off, off + len) to frames); qFrames += frames
+        while (q.size > 1 && qFrames - q.first().second >= holdbackFrames) pop()
+    }
+
+    private fun pop() { val (d, f) = q.removeFirst(); qFrames -= f; out(d, f); writtenFrames += f }
+
+    /** Записать пакеты, пока Σ < [needed]; вернуть число отброшенных хвостовых пакетов. */
+    fun finish(needed: Long): Int {
+        while (q.isNotEmpty() && writtenFrames < needed) pop()
+        val dropped = q.size
+        q.clear(); qFrames = 0
+        return dropped
+    }
+
+    companion object { const val DEFAULT_HOLDBACK = 96_000L }
+}
+
+/**
+ * Адаптер к .m4a: задержка → elst.media_time (ISO/IEC 14496-12 §8.6.6), длина → segment_duration.
+ * Лишние хвостовые пакеты (сверх ⌈(delay + N)/F⌉) отбрасываются — TailPacketHoldback.
+ */
+class Mp4PacketSink(val writer: Mp4AacWriter, holdbackFrames: Long = TailPacketHoldback.DEFAULT_HOLDBACK) : EncodedPacketSink {
+    private val hold = TailPacketHoldback(holdbackFrames) { d, _ -> writer.writePacket(d, 0, d.size) }
+    /** Сколько хвостовых пакетов отброшено при finish (для журнала). */
+    var droppedTailPackets = 0; private set
+    override fun writePacket(data: ByteArray, off: Int, len: Int, frames: Int) = hold.add(data, off, len, frames)
+    override fun finish(encoderDelay: Int, validFrames: Long) {
+        droppedTailPackets = hold.finish(encoderDelay + validFrames)
+        writer.finish(encoderDelay, validFrames)
+    }
 }
 
 /**
@@ -50,10 +90,14 @@ class Mp4PacketSink(val writer: Mp4AacWriter) : EncodedPacketSink {
  * поэтому [finish] требует, чтобы encoderDelay совпал с writer.preSkip (RFC 7845 §4.2, §4.4).
  * frames — длительность пакета в кадрах 48 кГц (по TOC, RFC 6716 §3.1).
  */
-class OggOpusPacketSink(val writer: OggOpusWriter) : EncodedPacketSink {
-    override fun writePacket(data: ByteArray, off: Int, len: Int, frames: Int) = writer.writePacket(data, off, len, frames)
+class OggOpusPacketSink(val writer: OggOpusWriter, holdbackFrames: Long = TailPacketHoldback.DEFAULT_HOLDBACK) : EncodedPacketSink {
+    private val hold = TailPacketHoldback(holdbackFrames) { d, f -> writer.writePacket(d, 0, d.size, f) }
+    /** Сколько пакетов после покрывающего preSkip + N отброшено (для журнала). */
+    var droppedTailPackets = 0; private set
+    override fun writePacket(data: ByteArray, off: Int, len: Int, frames: Int) = hold.add(data, off, len, frames)
     override fun finish(encoderDelay: Int, validFrames: Long) {
         require(encoderDelay == writer.preSkip) { "задержка энкодера $encoderDelay ≠ pre_skip ${writer.preSkip}" }
+        droppedTailPackets = hold.finish(encoderDelay + validFrames)
         writer.finish(validFrames)
     }
 }

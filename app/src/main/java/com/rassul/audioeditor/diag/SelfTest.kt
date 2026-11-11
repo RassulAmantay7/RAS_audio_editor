@@ -174,7 +174,7 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
                 if (!t.decodable) { problem("${r.file}: нет декодера ${t.codecName}"); return@use }
                 val g = GaplessResolver.resolve(s.source, t, p.tracks.size, profile::log)
                 val sc = ImpulseScan()
-                MediaDecoder(s.fileDescriptor, t.extractorIndex, t.format, g, profile, decoderDropsOverride = 0L)
+                MediaDecoder(s.fileDescriptor, t.extractorIndex, t.format, g, profile, decoderDropsOverride = 0L, decoderTailOverride = 0L)
                     .run(Progress.NONE, { fm -> sc.ch = fm.channels }) { b, n -> sc.push(b, n) }
                 val xImp = r.impulse - sc.at
                 val xLen = r.length - sc.frames
@@ -188,9 +188,12 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
             val tail: Long?
             when (val r = DecoderDropCalibration.infer(list, tol = 2, max = 8192, allowWholeDelay = mime == "audio/opus")) {
                 is DecoderDropCalibration.Result.Inconsistent -> {
+                    // Аудит T21 п. 4: «не сохранено» — старое значение профиля тоже не действует.
+                    profile.setDecoderDropsFrames(mime, null); profile.setDecoderTailFrames(mime, null)
                     problem("$name: сдвиг на разных файлах разный (${r.imps.joinToString()}) — калибровка не сохранена"); continue
                 }
                 is DecoderDropCalibration.Result.Implausible -> {
+                    profile.setDecoderDropsFrames(mime, null); profile.setDecoderTailFrames(mime, null)
                     problem("$name: неправдоподобная задержка декодера ${r.head} — калибровка не сохранена"); continue
                 }
                 is DecoderDropCalibration.Result.WholeDelay -> {
@@ -205,11 +208,13 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
                     tail = r.tail
                 }
             }
-            // Хвост в профиль не пишется (GaplessTrimmer его не моделирует) — только диагностика, см. timeline.md T21.
+            // Поправка хвоста — в профиль (аудит T21 п. 3): MediaDecoder передаёт в GaplessTrimmer хвост P − tail.
+            // Не согласована по файлам (null) — сброс, без поправки.
+            profile.setDecoderTailFrames(mime, tail)
             when {
                 tail == null -> info("$name: длина без поправки на разных файлах меняется по-разному — хвост декодера не определён")
-                tail > 0 -> info("$name: декодер, вероятно, сам обрезает в конце $tail кадров — длина будет короче на $tail")
-                tail < 0 -> info("$name: декодер, вероятно, дописывает в конце ${-tail} кадров — длина будет длиннее на ${-tail}")
+                tail > 0 -> info("$name: декодер сам обрезает в конце $tail кадров — учтено в профиле")
+                tail < 0 -> info("$name: декодер дописывает в конце ${-tail} кадров — учтено в профиле")
             }
         }
         // Проход 2: путь редактора (DecodePipeline) с профилем.
@@ -260,7 +265,7 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
         override fun close() { try { s.truncateToSize() } catch (_: Exception) {}; pfd.close() }
     }
 
-    private class EncMeas(val delayUsed: Int, val frames: Long, val impulse: Long, val codec: String)
+    private class EncMeas(val delayUsed: Int, val frames: Long, val impulse: Long, val codec: String, val delaySource: EncoderDelay.Source? = null)
 
     /** Кодирование сигнала → файл (свой писатель или MediaMuxer) → декодирование путём редактора. */
     private fun encodeMeasure(format: ExportFormat, rate: Int, n: Int, imp: Int, muxer: Boolean, delayOverride: Int?, name: String): EncMeas {
@@ -269,6 +274,7 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
         val plan = ExportPlanner.plan(src.spec, 16, ExportRequest(format))
         val f = File(dir, name)
         var used = -1
+        var usedSrc: EncoderDelay.Source? = null
         var codecName = ""
         FileTarget(f).use { tgt ->
             val spec = plan.outSpec
@@ -288,10 +294,10 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
             }
             codecName = enc.codecName
             try { ExportPipeline(renderer, plan, 1L).encodeTo(enc, Progress.NONE) } catch (e: Throwable) { enc.release(); throw e }
-            used = enc.encoderDelay
+            used = enc.encoderDelay; usedSrc = enc.delaySource
         }
         val m = decodeFile(f)
-        return EncMeas(used, m.frames, m.impulse, codecName)
+        return EncMeas(used, m.frames, m.impulse, codecName, usedSrc)
     }
 
     /** Декодирование файла тем же путём, что вход редактора (GaplessResolver + MediaDecoder с профилем). */
@@ -330,6 +336,9 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
         var delay: Int? = null
         if (abs(s) <= 1) {
             ownOk = abs(a.frames - n) <= tolLen
+            // Задержка — допущение (энкодер её не сообщил, как c2.android.aac.encoder), и импульс её подтвердил —
+            // записать измеренное значение в профиль, а не полагаться на допущение.
+            if (ownOk && a.delaySource == EncoderDelay.Source.ASSUMED) delay = a.delayUsed
             if (ownOk) ok("$name: свой писатель — длина и начало точные (задержка ${a.delayUsed})")
             else problem("$name: свой писатель — длина ${a.frames} вместо $n")
         } else {

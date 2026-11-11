@@ -384,3 +384,10 @@
 
 ### Тесты
 `scripts/check.sh` → `OK (267 tests)`, `CHECK: OK` (из них 25 новых: AuditMediaMathTest 7, AuditPcmDecodeTest 6, AuditDecoderTrimTest 3, AuditCalibrationTest 9).
+
+### Исправления по аудиту T21 и отчёту устройства (ветка fix2)
+- П. 3: `DeviceProfile.decoderTailFramesOrNull(mime)` = `tail` калибровки (X_t, < 0 — декодер дописывает); `DecoderTrim.plan(…, calibratedTail)` → хвост GaplessTrimmer `max(0, P − X_t)`. Устройство (c2.android.mp3.decoder): drops 529, tail −529 → хвост P + 529 (тест `mp3DeviceNumbers`).
+- П. 4: при Inconsistent/Implausible профиль для mime сбрасывается (drops и tail).
+- П. 7, 8, 9: буфер AudioTrack `max(min, цель)`; `Encoders.feed` — ошибка при входном буфере < кадра; допуск Opus — по TOC последнего пакета (`LengthTolerance.opusFrame`).
+- Энкодеры (устройство): перед EOS подаётся тишина `delay + 2·кадр`; `Mp4PacketSink`/`OggOpusPacketSink` через `TailPacketHoldback` пишут пакеты только до покрытия `delay + N` (MP4: K = ⌈(delay+N)/F⌉, Ogg: гранула preSkip + N), остальное отбрасывают. SelfTest записывает подтверждённую импульсом задержку энкодера, если она была допущением.
+- Риск (AAC): «декодер сам отбрасывает 1024» на файлах с elst — фактически перекрытие PTS (FR-7), т.е. зависит от elst файла, а не от декодера. Для D = 2112 (Apple), если экстрактор даёт перекрытие = D, профильное 1024 даст head 1088 и потерю 1088 кадров. Проверить на устройстве Apple-файлом; вероятное решение — для AAC в MP4 считать «отбрасывается вся задержка elst» (как WholeDelay у Opus).

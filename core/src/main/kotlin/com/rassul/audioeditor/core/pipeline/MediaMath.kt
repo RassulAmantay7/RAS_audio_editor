@@ -1,5 +1,6 @@
 package com.rassul.audioeditor.core.pipeline
 
+import com.rassul.audioeditor.core.format.ogg.OpusToc
 import java.nio.ByteBuffer
 
 /*
@@ -71,8 +72,13 @@ object DecoderTrim {
      * @param metaRate шкала, в которой записаны delay/padding (частота дорожки; Opus — 48 000).
      * @param calibrated калибровка DeviceProfile «декодер сам отбрасывает» (кадры выхода); null — не калибровалось.
      * @param dropsWholeDelayByDefault допущение без калибровки: декодер сам отбрасывает всю задержку (Opus: pre-skip из csd-1).
+     * @param calibratedTail калибровка DeviceProfile «изменение хвоста декодером» X_t (кадры выхода, tail из
+     *   DecoderDropCalibration): X_t > 0 — декодер сам обрезает X_t в конце, X_t < 0 — дописывает −X_t (C2SoftMp3Dec:
+     *   529 нулей, [предположение по AOSP]). GaplessTrimmer получает хвост P' = max(0, P − X_t) (аудит T21 п. 3:
+     *   длина L₀ = L − X_h − X_t ⇒ обрезать надо P − X_t, чтобы длина была точной). null или 0 — без поправки.
      */
-    fun plan(delay0: Long, padding0: Long, metaRate: Int, outRate: Int, calibrated: Long?, dropsWholeDelayByDefault: Boolean): Params {
+    fun plan(delay0: Long, padding0: Long, metaRate: Int, outRate: Int, calibrated: Long?, dropsWholeDelayByDefault: Boolean,
+             calibratedTail: Long? = null): Params {
         val notes = ArrayList<String>()
         var delay = delay0; var pad = padding0
         // HE-AAC: значения в шкале частоты ядра (mdhd = 22,05/24 кГц), выход вдвое выше (timeline.md «Приоритет источников»).
@@ -85,6 +91,12 @@ object DecoderTrim {
         if (pad < 0 || pad > outRate) { if (pad != 0L) notes += "FR-26: хвост $pad кадров отброшен как неправдоподобный"; pad = 0 }
         if (delay < 0 || delay > outRate) { notes += "FR-26: задержка $delay кадров отброшена как неправдоподобная"; delay = 0 }
         val drops = calibrated ?: if (dropsWholeDelayByDefault) delay else 0L
+        // Поправка хвоста декодера (калибровка): P' = P − X_t; отрицательное — прижать к 0 (декодер обрезал больше хвоста).
+        if (calibratedTail != null && calibratedTail != 0L) {
+            val p2 = pad - calibratedTail
+            notes += "FR-26: хвост с поправкой декодера ${-calibratedTail} кадров: $pad → ${maxOf(0L, p2)}"
+            pad = maxOf(0L, p2)
+        }
         return Params(delay, pad, drops, notes)
     }
 }
@@ -165,6 +177,16 @@ object LengthTolerance {
         val d = Math.abs(decoded - expected)
         return when { d <= 1 -> Verdict.OK; d <= frame -> Verdict.WARN; else -> Verdict.FAIL }
     }
+
+    /**
+     * «Кадр» запасного допуска Opus = длительность последнего пакета по TOC (timeline.md FR-33 «по размеру последнего
+     * пакета», до 2880 и больше у пакетов из нескольких кадров; RFC 6716 §3.1). Пакета нет или TOC не читается — 960 (20 мс).
+     */
+    fun opusFrame(lastPacket: ByteArray?): Int =
+        if (lastPacket == null || lastPacket.isEmpty()) 960 else try { OpusToc.samples48(lastPacket) } catch (_: IllegalArgumentException) { 960 }
+
+    /** То же по уже посчитанной длине последнего пакета (кадры 48 кГц); ≤ 0 — 960. */
+    fun opusFrame(lastPacketFrames: Int): Int = if (lastPacketFrames > 0) lastPacketFrames else 960
 }
 
 /** NFR-7: линейная экстраполяция времени замера на целевую длительность (все этапы потоковые). */

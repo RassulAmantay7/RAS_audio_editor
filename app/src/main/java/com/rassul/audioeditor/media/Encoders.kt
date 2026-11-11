@@ -61,6 +61,8 @@ abstract class MediaCodecEncoderSink(
     private var eos = false
     /** Задержка, записанная в контейнер (после первого пакета). */
     var encoderDelay: Int = -1; private set
+    /** Источник задержки (после первого пакета): калибровка / профиль / формат / допущение. */
+    var delaySource: EncoderDelay.Source? = null; private set
     var packets = 0L; private set
     val codecName: String get() = codec.name
 
@@ -99,6 +101,8 @@ abstract class MediaCodecEncoderSink(
     protected abstract fun delayFromEncoder(config: ByteArray?, fmt: MediaFormat?): Int?
     protected abstract val defaultDelay: Int
     protected abstract val delayFromProfile: Int?
+    /** Кадров на пакет (AAC 1024; Opus — 960 = 20 мс, Android по умолчанию) — для тишины перед EOS. */
+    protected abstract val frameSize: Int
 
     override fun writePcm(pcm: FloatArray, frames: Int) {
         val ch = spec.channels
@@ -124,6 +128,8 @@ abstract class MediaCodecEncoderSink(
                 val ib = codec.getInputBuffer(ii)!!
                 ib.clear()
                 val m = minOf(len - off, ib.remaining() / frameBytes * frameBytes)
+                // Входной буфер меньше одного кадра → m = 0 и цикл не продвигается (аудит T21 п. 8).
+                if (m <= 0) throw CoreException("Энкодер ${name()} дал входной буфер ${ib.remaining()} байт — меньше одного кадра ($frameBytes байт).")
                 ib.put(b, off, m)
                 val pts = MediaMath.framesToUs(fed, spec.sampleRate)
                 codec.queueInputBuffer(ii, 0, m, pts, 0)
@@ -136,6 +142,10 @@ abstract class MediaCodecEncoderSink(
 
     override fun finish(totalFrames: Long) {
         try {
+            // Тишина перед EOS: delay + кадр (+ кадр запаса), иначе энкодер может не выдать пакеты, покрывающие delay + N
+            // (c2.android.opus.encoder: пакетов ровно на N, без хвоста под pre-skip). Лишние пакеты отбрасывает
+            // адаптер контейнера (TailPacketHoldback: ⌈(delay + N)/F⌉ для MP4, гранула preSkip + N для Ogg).
+            padSilence(maxOf(encoderDelay, defaultDelay, delayOverride ?: 0, delayFromProfile ?: 0) + 2 * frameSize)
             while (true) {
                 val ii = codec.dequeueInputBuffer(10_000)
                 if (ii >= 0) { codec.queueInputBuffer(ii, 0, 0, MediaMath.framesToUs(fed, spec.sampleRate), MediaCodec.BUFFER_FLAG_END_OF_STREAM); break }
@@ -147,9 +157,20 @@ abstract class MediaCodecEncoderSink(
             val s = sink ?: throw CoreException("Энкодер ${name()} не выдал ни одного пакета.")
             // FR-25: m4a — elst(media_time = delay, segment = N); Ogg — pre_skip = delay, гранула = delay + N.
             s.finish(encoderDelay, totalFrames)
+            val dropped = (s as? Mp4PacketSink)?.droppedTailPackets ?: (s as? OggOpusPacketSink)?.droppedTailPackets ?: 0
+            if (dropped > 0) profile?.log("Энкодер ${name()}: отброшено $dropped хвостовых пакетов заполнения")
         } finally {
             release()
         }
+    }
+
+    /** Подать [frames] кадров тишины (после конца сигнала — в контейнер не попадают, обрезаются по delay + N). */
+    private fun padSilence(frames: Int) {
+        val frameBytes = (if (floatInput) 4 else 2) * spec.channels
+        val chunk = 1024
+        val z = ByteArray(chunk * frameBytes)
+        var left = frames
+        while (left > 0) { val k = minOf(left, chunk); feed(z, k * frameBytes, k, frameBytes); left -= k }
     }
 
     /** Освободить энкодер (при отмене — вызвать вместо finish). */
@@ -188,7 +209,7 @@ abstract class MediaCodecEncoderSink(
         // Ровно один источник (без сложения формата и профиля) — EncoderDelay.choose (:core, аудит T21).
         val (d, src) = EncoderDelay.choose(delayOverride, delayFromProfile, fromEnc, defaultDelay)
         profile?.log("Задержка энкодера ${name()}: $d кадров (${src.text})")
-        encoderDelay = d
+        encoderDelay = d; delaySource = src
         return makeSink(fmt, csd(config, fmt), d).also { sink = it }
     }
 }
@@ -202,6 +223,7 @@ class AacEncoderSink(
     override fun configureExtra(f: MediaFormat) { f.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC) }
     override fun packetFrames(b: ByteArray, len: Int) = 1024
     override val defaultDelay = 1024
+    override val frameSize = 1024
     override val delayFromProfile: Int? get() = profile?.encoderDelayAac
     override fun delayFromEncoder(config: ByteArray?, fmt: MediaFormat?): Int? =
         fmt?.takeIf { it.containsKey(MediaFormat.KEY_ENCODER_DELAY) }?.getInteger(MediaFormat.KEY_ENCODER_DELAY, 0)?.takeIf { it > 0 }
@@ -218,6 +240,7 @@ class OpusEncoderSink(
     override fun name() = "Opus"
     override fun packetFrames(b: ByteArray, len: Int) = OpusToc.samples48(b, 0, len)
     override val defaultDelay = 312
+    override val frameSize = 960
     override val delayFromProfile: Int? get() = profile?.encoderDelayOpus
 
     override fun delayFromEncoder(config: ByteArray?, fmt: MediaFormat?): Int? {

@@ -137,8 +137,10 @@ class DeviceVerifier(ctx: Context, private val profile: DeviceProfile = DevicePr
         if (ch != e.channels) return VerifyReport(false, failText("каналов $ch вместо ${e.channels}", false), actualFrames = stats.frames)
         val n = stats.frames
         val diff = Math.abs(n - e.frames)
-        // Допуск FR-33: ±1 сэмпл; запасной режим FR-26 — ±1 кадр (AAC 1024, Opus 960) с записью в журнал.
-        val frame = if (e.format == ExportFormat.M4A) 1024 else 960
+        // Допуск FR-33: ±1 сэмпл; запасной режим FR-26 — ±1 кадр (AAC 1024; Opus — длительность последнего пакета
+        // по TOC, timeline.md FR-33, аудит T21 п. 9) с записью в журнал.
+        val frame = if (e.format == ExportFormat.M4A) 1024 else com.rassul.audioeditor.core.pipeline.LengthTolerance.opusFrame(
+            try { OggReader.read(src).packets.drop(2).lastOrNull { it.data.isNotEmpty() }?.data } catch (_: Exception) { null })
         return when (com.rassul.audioeditor.core.pipeline.LengthTolerance.lossy(n, e.frames, frame)) {
             com.rassul.audioeditor.core.pipeline.LengthTolerance.Verdict.OK -> base
             com.rassul.audioeditor.core.pipeline.LengthTolerance.Verdict.WARN -> {

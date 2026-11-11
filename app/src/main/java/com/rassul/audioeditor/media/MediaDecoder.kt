@@ -119,6 +119,8 @@ class MediaDecoder(
     private val maxOutputChannels: Int = 8,
     /** Переопределение «декодер сам отбрасывает» для калибровки; null — из DeviceProfile / допущение. */
     private val decoderDropsOverride: Long? = null,
+    /** Переопределение поправки хвоста декодера (калибровка: 0 — без поправки); null — из DeviceProfile. */
+    private val decoderTailOverride: Long? = null,
     /** Длительность для прогресса, мкс. */
     private val durationUs: Long = trackFormat.getLong(MediaFormat.KEY_DURATION, 0L),
 ) {
@@ -291,7 +293,8 @@ class MediaDecoder(
         val g = gapless.info
         // Пересчёт HE-AAC, отсев неправдоподобных значений, «декодер сам отбрасывает» — DecoderTrim (:core, аудит T21).
         val p = DecoderTrim.plan(g?.delayFrames ?: 0L, g?.paddingFrames ?: 0L, if (g != null) gapless.rate else 0, outRate,
-            decoderDropsOverride ?: profile?.decoderDropsFramesOrNull(mime), mime.equals("audio/opus", true))
+            decoderDropsOverride ?: profile?.decoderDropsFramesOrNull(mime), mime.equals("audio/opus", true),
+            decoderTailOverride ?: profile?.decoderTailFramesOrNull(mime))
         p.notes.forEach { log(it) }
         val delay = p.delay; val pad = p.padding; val drops = p.decoderDrops
         if (drops != 0L) log("FR-26: декодер $mime сам отбрасывает $drops кадров (профиль/допущение)")

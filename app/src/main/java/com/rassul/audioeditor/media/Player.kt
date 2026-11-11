@@ -148,8 +148,10 @@ class Player(renderer: Renderer) {
         return try {
             val min = AudioTrack.getMinBufferSize(spec.sampleRate, chMask, AudioFormat.ENCODING_PCM_FLOAT)
             val frameBytes = 4 * spec.channels
-            // ≈ 2× минимального, но не меньше 40 мс и не больше 120 мс (timeline.md FR-32: запись вперёд + блок ≤ 200 мс).
-            val want = (2 * maxOf(min, 0)).coerceIn(spec.sampleRate / 25 * frameBytes, spec.sampleRate * 120 / 1000 * frameBytes)
+            // Цель ≈ 2× минимального, но 40…120 мс (timeline.md FR-32: запись вперёд + блок ≤ 200 мс); меньше минимума
+            // устройства (getMinBufferSize) брать нельзя — AudioTrack не создастся (аудит T21 п. 7): max(min, цель).
+            val target = (2 * maxOf(min, 0)).coerceIn(spec.sampleRate / 25 * frameBytes, spec.sampleRate * 120 / 1000 * frameBytes)
+            val want = maxOf(min, target)
             val t = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
                 .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setSampleRate(spec.sampleRate).setChannelMask(chMask).build())
