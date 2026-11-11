@@ -24,6 +24,13 @@ jobs:
       - name: Install ffmpeg and flac (reference tools for :core tests)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg flac > /dev/null && ffmpeg -version | head -1 && flac --version
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python reference libs (numpy, scipy, pyloudnorm)
+        run: pip install -q numpy scipy pyloudnorm && python -c "import numpy, scipy, pyloudnorm; print('py ok')"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
