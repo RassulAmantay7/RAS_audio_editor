@@ -15,6 +15,8 @@ import com.rassul.audioeditor.core.format.ogg.OpusToc
 import com.rassul.audioeditor.core.model.CoreException
 import com.rassul.audioeditor.core.model.PcmSpec
 import com.rassul.audioeditor.core.pipeline.EncodedPacketSink
+import com.rassul.audioeditor.core.pipeline.EncoderDelay
+import com.rassul.audioeditor.core.pipeline.MediaMath
 import com.rassul.audioeditor.core.pipeline.Mp4PacketSink
 import com.rassul.audioeditor.core.pipeline.OggOpusPacketSink
 import com.rassul.audioeditor.core.pipeline.PcmEncoderSink
@@ -123,7 +125,7 @@ abstract class MediaCodecEncoderSink(
                 ib.clear()
                 val m = minOf(len - off, ib.remaining() / frameBytes * frameBytes)
                 ib.put(b, off, m)
-                val pts = fed * 1_000_000L / spec.sampleRate
+                val pts = MediaMath.framesToUs(fed, spec.sampleRate)
                 codec.queueInputBuffer(ii, 0, m, pts, 0)
                 fed += m / frameBytes
                 off += m
@@ -136,7 +138,7 @@ abstract class MediaCodecEncoderSink(
         try {
             while (true) {
                 val ii = codec.dequeueInputBuffer(10_000)
-                if (ii >= 0) { codec.queueInputBuffer(ii, 0, 0, fed * 1_000_000L / spec.sampleRate, MediaCodec.BUFFER_FLAG_END_OF_STREAM); break }
+                if (ii >= 0) { codec.queueInputBuffer(ii, 0, 0, MediaMath.framesToUs(fed, spec.sampleRate), MediaCodec.BUFFER_FLAG_END_OF_STREAM); break }
                 drain(0)
             }
             var guard = 0
@@ -183,9 +185,9 @@ abstract class MediaCodecEncoderSink(
     private fun openSink(): EncodedPacketSink {
         val fmt = outFormat ?: codec.outputFormat
         val fromEnc = delayFromEncoder(config, fmt)
-        val d = delayOverride ?: delayFromProfile ?: fromEnc ?: defaultDelay
-        val src = when { delayOverride != null -> "калибровка"; delayFromProfile != null -> "DeviceProfile"; fromEnc != null -> "формат энкодера"; else -> "допущение" }
-        profile?.log("Задержка энкодера ${name()}: $d кадров ($src)")
+        // Ровно один источник (без сложения формата и профиля) — EncoderDelay.choose (:core, аудит T21).
+        val (d, src) = EncoderDelay.choose(delayOverride, delayFromProfile, fromEnc, defaultDelay)
+        profile?.log("Задержка энкодера ${name()}: $d кадров (${src.text})")
         encoderDelay = d
         return makeSink(fmt, csd(config, fmt), d).also { sink = it }
     }
@@ -221,7 +223,7 @@ class OpusEncoderSink(
     override fun delayFromEncoder(config: ByteArray?, fmt: MediaFormat?): Int? {
         val head = opusHead(config, fmt)
         if (head != null && head.size >= 12) return head.u16le(10)          // pre_skip (RFC 7845 §5.1)
-        fmt?.let { GaplessResolver.csd(it, "csd-1") }?.takeIf { it.size >= 8 }?.let { return ((it.u64le(0) * 48000L + 500_000_000L) / 1_000_000_000L).toInt() }
+        fmt?.let { GaplessResolver.csd(it, "csd-1") }?.takeIf { it.size >= 8 }?.let { return MediaMath.nsToFrames(it.u64le(0), 48000).toInt() }
         return null
     }
 
@@ -256,7 +258,7 @@ class MuxerPacketSink(fd: java.io.FileDescriptor, outputFormat: Int, private val
     override fun writePacket(data: ByteArray, off: Int, len: Int, frames: Int) {
         if (buf.capacity() < len) buf = ByteBuffer.allocate(len)
         buf.clear(); buf.put(data, off, len); buf.flip()
-        bi.set(0, len, this.frames * 1_000_000L / rate, MediaCodec.BUFFER_FLAG_KEY_FRAME)
+        bi.set(0, len, MediaMath.framesToUs(this.frames, rate), MediaCodec.BUFFER_FLAG_KEY_FRAME)
         muxer.writeSampleData(track, buf, bi)
         this.frames += frames
     }

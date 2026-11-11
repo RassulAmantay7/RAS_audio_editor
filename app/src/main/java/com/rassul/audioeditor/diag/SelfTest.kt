@@ -18,6 +18,8 @@ import com.rassul.audioeditor.core.model.ArrayPcmSource
 import com.rassul.audioeditor.core.model.PcmSource
 import com.rassul.audioeditor.core.model.PcmSpec
 import com.rassul.audioeditor.core.model.Progress
+import com.rassul.audioeditor.core.pipeline.DecoderDropCalibration
+import com.rassul.audioeditor.core.pipeline.EncoderDelay
 import com.rassul.audioeditor.core.pipeline.ExportFormat
 import com.rassul.audioeditor.core.pipeline.ExportPipeline
 import com.rassul.audioeditor.core.pipeline.ExportPlanner
@@ -162,8 +164,8 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
         val refs = manifest()
         val lossy = setOf("aac", "mp3", "opus")
         // Проход 1: «сырой» декодер (без поправки профиля) → X по каждому кодеку.
-        val xs = LinkedHashMap<String, MutableList<Pair<Long, Long>>>()   // mime → (X_imp, X_len)
-        val delays = HashMap<String, Long>()
+        // mime → (X_imp, X_len, заявленная задержка ЭТОГО файла): у файлов одного кодека она может быть разной (аудит T21).
+        val xs = LinkedHashMap<String, MutableList<DecoderDropCalibration.Sample>>()
         for (r in refs.filter { it.codec in lossy }) {
             val f = asset(r.file)
             openFile(f, null).use { s ->
@@ -171,36 +173,44 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
                 val t = p.tracks[p.defaultTrack]
                 if (!t.decodable) { problem("${r.file}: нет декодера ${t.codecName}"); return@use }
                 val g = GaplessResolver.resolve(s.source, t, p.tracks.size, profile::log)
-                delays[t.mime.lowercase()] = g.info?.delayFrames ?: 0L
                 val sc = ImpulseScan()
                 MediaDecoder(s.fileDescriptor, t.extractorIndex, t.format, g, profile, decoderDropsOverride = 0L)
                     .run(Progress.NONE, { fm -> sc.ch = fm.channels }) { b, n -> sc.push(b, n) }
                 val xImp = r.impulse - sc.at
                 val xLen = r.length - sc.frames
                 info("${r.file}: без поправки длина ${sc.frames} (ожид. ${r.length}), импульс ${sc.at} (ожид. ${r.impulse}) → декодер сам отбрасывает ≈ $xImp")
-                xs.getOrPut(t.mime.lowercase()) { ArrayList() } += xImp to xLen
+                xs.getOrPut(t.mime.lowercase()) { ArrayList() } += DecoderDropCalibration.Sample(xImp, xLen, g.info?.delayFrames ?: 0L)
             }
         }
         for ((mime, list) in xs) {
             val name = ExtractPlanner_codec(mime)
-            val imps = list.map { it.first }
-            val lens = list.map { it.second }
-            val spread = (imps.maxOrNull() ?: 0) - (imps.minOrNull() ?: 0)
-            if (spread > 2) { problem("$name: сдвиг на разных файлах разный (${imps.joinToString()}) — калибровка не сохранена"); continue }
-            // Длина даёт точное целое, если хвост декодер не трогает; импульс — контроль (±2 из-за сжатия).
-            val xl = lens.first()
-            val x = if (lens.all { it == xl } && abs(xl - imps.first()) <= 2) xl else imps.sorted()[imps.size / 2]
-            if (x < 0 || x > 8192) { problem("$name: неправдоподобная задержка декодера $x — калибровка не сохранена"); continue }
-            val delay = delays[mime] ?: 0L
-            if (mime == "audio/opus" && x == delay) {
-                // Декодер отбрасывает весь pre-skip — это допущение по умолчанию; оставить его (pre-skip бывает разный).
-                profile.setDecoderDropsFrames(mime, null)
-                calibrated += "$name: декодер сам отбрасывает весь pre-skip ($x) — по умолчанию"
-            } else {
-                profile.setDecoderDropsFrames(mime, x)
-                calibrated += "$name: декодер сам отбрасывает $x кадров"
+            // Вывод по двум оценкам (импульс ± 2, длина — точно) — DecoderDropCalibration (:core, аудит T21).
+            val tail: Long?
+            when (val r = DecoderDropCalibration.infer(list, tol = 2, max = 8192, allowWholeDelay = mime == "audio/opus")) {
+                is DecoderDropCalibration.Result.Inconsistent -> {
+                    problem("$name: сдвиг на разных файлах разный (${r.imps.joinToString()}) — калибровка не сохранена"); continue
+                }
+                is DecoderDropCalibration.Result.Implausible -> {
+                    problem("$name: неправдоподобная задержка декодера ${r.head} — калибровка не сохранена"); continue
+                }
+                is DecoderDropCalibration.Result.WholeDelay -> {
+                    // Декодер отбрасывает весь pre-skip — это допущение по умолчанию; оставить его (pre-skip бывает разный).
+                    profile.setDecoderDropsFrames(mime, null)
+                    calibrated += "$name: декодер сам отбрасывает весь pre-skip (${list.joinToString { it.declaredDelay.toString() }}) — по умолчанию"
+                    tail = r.tail
+                }
+                is DecoderDropCalibration.Result.Absolute -> {
+                    profile.setDecoderDropsFrames(mime, r.head)
+                    calibrated += "$name: декодер сам отбрасывает ${r.head} кадров"
+                    tail = r.tail
+                }
             }
-            if (lens.any { it != x }) info("$name: длина без поправки отличается от сдвига начала — декодер, вероятно, режет и хвост")
+            // Хвост в профиль не пишется (GaplessTrimmer его не моделирует) — только диагностика, см. timeline.md T21.
+            when {
+                tail == null -> info("$name: длина без поправки на разных файлах меняется по-разному — хвост декодера не определён")
+                tail > 0 -> info("$name: декодер, вероятно, сам обрезает в конце $tail кадров — длина будет короче на $tail")
+                tail < 0 -> info("$name: декодер, вероятно, дописывает в конце ${-tail} кадров — длина будет длиннее на ${-tail}")
+            }
         }
         // Проход 2: путь редактора (DecodePipeline) с профилем.
         for (r in refs) {
@@ -323,7 +333,7 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
             if (ownOk) ok("$name: свой писатель — длина и начало точные (задержка ${a.delayUsed})")
             else problem("$name: свой писатель — длина ${a.frames} вместо $n")
         } else {
-            val d = a.delayUsed + s.toInt()
+            val d = EncoderDelay.trueDelay(a.delayUsed, a.impulse, imp.toLong()).toInt()   // D = D_исп + (p − I)
             info("$name: начало сдвинуто на $s → истинная задержка энкодера ≈ $d")
             if (d in 0..8192) {
                 val b = encodeMeasure(format, rate, n, imp, muxer = false, delayOverride = d, name = "enc_cal.${format.ext}")
@@ -390,9 +400,8 @@ class SelfTest(ctx: Context, private val profile: DeviceProfile = DeviceProfile.
         }
         val src = ArrayPcmSource(PcmSpec(rate, ch), d)
         val renderer = Renderer(src, EditList(), RenderSettings())
-        val k = 1800.0 / sec
         fun report(what: String, seconds: Double, targetSec: Int?) {
-            val est = seconds * k
+            val est = com.rassul.audioeditor.core.pipeline.Nfr7.extrapolate(seconds, sec)   // ×60 для 30 с → 30 мин
             val txt = "$what: 30 с за ${fmt(seconds)} с → 30 мин ≈ ${fmt(est)} с" + (targetSec?.let { " (цель ≤ $it с)" } ?: "")
             if (targetSec == null || est <= targetSec) ok(txt) else problem(txt)
         }

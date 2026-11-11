@@ -11,6 +11,7 @@ import com.rassul.audioeditor.core.model.CoreException
 import com.rassul.audioeditor.core.model.PcmSpec
 import com.rassul.audioeditor.core.model.Progress
 import com.rassul.audioeditor.core.peaks.PeakPyramid
+import com.rassul.audioeditor.core.pipeline.MediaMath
 import com.rassul.audioeditor.core.pipeline.SpaceEstimator
 import com.rassul.audioeditor.diag.DeviceProfile
 
@@ -101,7 +102,8 @@ class DecodePipeline(
         val w = WavReader(src.source)
         val inCh = w.spec.channels
         val outSpec = PcmSpec(w.spec.sampleRate, Downmix.outputChannels(inCh))
-        val m = Downmix.matrix(w.channelMask, inCh)
+        // WAVE_FORMAT_EXTENSIBLE хранит маску SPEAKER_* (FL = 0x1), Downmix ждёт CHANNEL_OUT_* (FL = 0x4) — аудит T21.
+        val m = Downmix.matrix(MediaMath.waveMaskToAndroid(w.channelMask), inCh)
         val cache = PcmCache.create(ctx, outSpec)
         val peaks = PeakPyramid(outSpec.channels)
         try {
@@ -115,7 +117,7 @@ class DecodePipeline(
                 if (progress.isCancelled) throw CancelledException()
                 val n = w.read(pos, inb, minOf(block.toLong(), total - pos).toInt())
                 if (n <= 0) break
-                for (i in 0 until n * inCh) { val v = inb[i]; if (v.isNaN() || v.isInfinite()) inb[i] = 0f }
+                com.rassul.audioeditor.core.pipeline.PcmDecode.sanitize(inb, 0, n * inCh)
                 Downmix.apply(m, inb, n, outb)
                 cache.append(outb, n)
                 synchronized(peaks) { peaks.append(outb, n) }

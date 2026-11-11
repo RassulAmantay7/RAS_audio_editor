@@ -329,3 +329,58 @@
 ### Тесты
 `core/src/test/kotlin/com/rassul/audioeditor/core/audit/edit/`: `AuditNaive.kt` (независимая последовательная реализация на массиве, генератор с перекосом к краям и старым стыкам, непотокобезопасный источник), `AuditRenderTest` (7: 500 случайных списков, seed 20251111, N ∈ {0,1,2,3,7,24,240}, рендер случайными кусками со случайным dstOffset — бит в бит; множители через удалённые позже куски; Delete у старого стыка ±300; вектор short_piece; чувствительность к порядку умножения; 4 читателя одновременно; края), `AuditFirstDiffTest` (2: свойство fd ≤ истинной первой разницы на 600 случайных парах + симметрия; формулы p), `AuditNormalizeLoopTest` (6: измерение по результату префикса для Lufs/Peak, заморозка и redo, неразрешённая в середине, тишина/короткий; векторы FR-32 при блоках 1/7/4096/48 000/100 000, курсор 72 000 и half-up), `AuditExportTest` (6: MD5 = STREAMINFO = независимое квантование на SplittableRandom, дизер только 16 бит; ресемплер и длина, независимость от блока; срезанные; ffmpeg FLAC16/WAV24/FLAC24 — те же целые; тексты Verifier; порядок CLI).
 `scripts/check.sh core` → OK (235 tests), CHECK: OK; аудит-классы с `REQUIRE_TOOLS=1` — OK (21).
+
+---
+## Аудит расчётной склейки :app (T21)
+
+Объект: `app/.../media/{DecodePipeline,MediaDecoder,Encoders,Player,RemuxCopier,TrackProbe}.kt`, `app/.../diag/{SelfTest,DeviceVerifier}.kt`.
+Запускать на устройстве нельзя, поэтому чистая арифметика вынесена в `core/.../pipeline/MediaMath.kt`: `MediaMath`, `PcmDecode`, `DecoderTrim`, `DecoderDropCalibration`, `EncoderDelay`, `LengthTolerance`, `Nfr7`. :app вызывает именно эти функции, так что тесты проверяют тот код, который работает на телефоне.
+Тесты: `core/src/test/kotlin/com/rassul/audioeditor/core/audit/app/*Test.kt` (25 тестов). Модель «декодер → GaplessTrimmer → Holdback» — `AppSim.kt`.
+
+### Вердикт: ЕСТЬ РАСХОЖДЕНИЯ (1 критичное и 1 важное исправлены; 1 важное и 7 замечаний — в отчёте)
+
+### Сопоставление формул и кода
+| Формула / правило | Код | Статус |
+|---|---|---|
+| FR-26: перед `configure()` убрать `KEY_ENCODER_DELAY/PADDING`, обрезает только GaplessTrimmer | MediaDecoder.kt `run` (removeKey до configure; при повторе без float ключи тоже сняты) | ✓ |
+| Порядок: PtsGapFiller → GaplessTrimmer → NaN→0 → Downmix (timeline.md FR-7) | MediaDecoder.kt `loop`/`emit`, DecodePipeline.kt `decodeCodec` | ✓ |
+| ф. 7: разрыв/перекрытие PTS, `⌊(Δpts·fs+5·10⁵)/10⁶⌋`, pts₀ первого буфера | `PtsGapFiller` (:core), вход — `presentationTimeUs`, fs — выходная | ✓ |
+| «Декодер сам отбрасывает»: калибровка → иначе Opus = весь pre-skip, остальные 0; head = max(0, D − X) | `DecoderTrim.plan` ← MediaDecoder.makeTrimmer; `GaplessTrimmer` | ✓ (AppSim: длина и импульс ± 0 на 3000 случайных наборах; Opus без двойной обрезки) |
+| HE-AAC: задержка ×k к выходной частоте | `DecoderTrim.plan` | ✓ по формуле (см. замечание 3 о шкале) |
+| PCM → float: 16 бит ×1/32768, 24 бит ×2⁻²³, 32 бит ×2⁻³¹, 8 бит (u−128)/128; NaN/Inf → 0 | `PcmDecode.toFloat/sanitize` ← MediaDecoder, DecodePipeline (WAV) | ✓ (все 65 536 значений int16 восстанавливаются точно ×32768 — нужно для MD5 FR-33) |
+| Downmix по маске Android CHANNEL_OUT_* (FR-C5) | DecodePipeline.kt `decodeWav` | **✗ → исправлено** (см. п. 1) |
+| Задержка энкодера: калибровка → профиль → формат → допущение, один источник, без сложения | `EncoderDelay.choose` ← Encoders.kt `openSink` | ✓ |
+| Opus: pre-skip/гранулы в 48 кГц, validFrames = кадры после ресемплинга; csd-1 нс → кадры half-up | Encoders.kt, `OggOpusPacketSink` (delay == preSkip), `MediaMath.nsToFrames` | ✓ (6 500 000 нс → 312) |
+| Курсор `F = framePosition + round_half_up(Δns·fs/10⁹)`, позиция `p0 + (F − w0)`, задержку тракта не вычитать; head — беззнаковый | Player.kt `position` → `LoopCursor.cursorAt` / `renderPositionAt(head and 0xFFFFFFFF)` | ✓ (контрольный пример 72 000 уже в LoopCursorTest / AuditNormalizeLoopTest) |
+| FR-23: шкала пользователя `s − D`; elst = hidden; pre-skip = hidden; LAME delay = hidden − 529 | RemuxCopier.kt `previewFastTrim`/`fastTrim` | ✓ |
+| PTS пакетов → кадры half-up (шаг AAC, пакеты без длины, длительность MediaMuxer) | RemuxCopier.kt → `MediaMath.usToFrames` | ✓ (BigDecimal HALF_UP, 200 000 случайных; 23 219 мкс → 1024) |
+| SelfTest: X_imp = I − p₀, X_len = L − L₀ | SelfTest.kt `decoders` | ✓ (знаки подтверждены моделью) |
+| SelfTest: вывод по двум оценкам, допуск ± 2 | `DecoderDropCalibration.infer` ← SelfTest | **✗ → исправлено** (см. п. 2) |
+| SelfTest: D = D_исп + (p − I) | `EncoderDelay.trueDelay` ← SelfTest `encoder` | ✓ (знак проверен в обе стороны) |
+| NFR-7: оценка = t·1800/30 (×60) | `Nfr7.extrapolate` ← SelfTest `benchmarks` | ✓ |
+| FR-33: \|ΔN\| ≤ 1 — OK; ≤ кадр (AAC 1024 / Opus 960) — предупреждение; иначе ошибка. FLAC: f·2^(b−1) — целое, иначе только длина | `LengthTolerance.lossy` ← DeviceVerifier; `verifyFlacDecode` | ✓ |
+| Int-переполнения: кадры, смещения кэша, PTS | счётчики Long; PcmCache `frames * frameBytes` в Long; на буфер `n·ch` ≤ размер буфера | ✓ (30 мин @192 кГц — 2,76 ГБ кэша, Long) |
+| Деление на ноль | fs > 0 гарантирует onFormatChanged («неверный формат»); прогресс — `maxOf(1, …)` | ✓ |
+
+### Найденные проблемы
+1. **[КРИТИЧНО, исправлено] DecodePipeline.kt `decodeWav` (и TrackProbe.kt `wavOnly`): маска WAVE_FORMAT_EXTENSIBLE передавалась в Downmix как маска Android.**
+   В WAV `dwChannelMask` — это биты SPEAKER_* (FL = 0x1), а `Downmix.matrix` ждёт CHANNEL_OUT_* (FL = 0x4). Для WAV 5.1 (0x3F) выходило так: L и R исходника пропадали (коэффициент 0), FC шёл только влево, LFE — вправо.
+   → Теперь `MediaMath.waveMaskToAndroid(m) = (m & 0x3FFFF) << 2`. Тест `wav51DownmixUsesConvertedMask`.
+2. **[ВАЖНО, исправлено] SelfTest.kt `decoders`: вывод калибровки — три ошибки.**
+   (а) Задержка бралась у ПОСЛЕДНЕГО файла кодека (`delays[mime]` перезаписывалась). Если у Opus-эталонов разный pre-skip, получалось «сдвиг разный — не сохранено».
+   (б) «Весь pre-skip» определялся строгим `x == delay`, хотя импульс даёт ± 2. При x = 311 в профиль попадало абсолютное 311, и потом оно неверно применялось к файлам с другим pre-skip — тот же смысл «сколько отбрасывает декодер» в калибровке и в MediaDecoder расходился.
+   (в) Разброс импульсов проверялся с порогом ≤ 2, а это строже допуска ± 2 на каждый файл: оценки +2 и −2 отвергались, хотя точная длина согласована.
+   → `DecoderDropCalibration.infer`: сначала Opus «весь pre-skip» по каждому файлу (± 2); затем точный путь по длине, если каждая оценка по импульсу в ± 2 от неё; иначе разброс ≤ 2 и медиана импульсов.
+3. **[ВАЖНО, не исправлено — затрагивает DeviceProfile, GaplessTrimmer и MediaDecoder] Изменение хвоста системным декодером не моделируется.**
+   По AOSP C2SoftMp3Dec/SoftMP3 [предположение, проверить на телефоне] декодер отбрасывает 529 в начале и дописывает 529 нулей в конце. Тогда X_imp = 529, X_len = 0, и после калибровки head = 529 длина MP3 становится на **+529** больше (FR-26 требует ± 0). Самопроверка покажет это как «длина не совпала». Раньше в журнале была ошибочная фраза «декодер режет хвост» — теперь знак выводится верно.
+   → Рекомендация: хранить в DeviceProfile `decoderTailFrames(mime)` = `tail` из `DecoderDropCalibration` и в `DecoderTrim.plan` передавать `padding − tail`. Тест `mp3HeadDropTailAppend` показывает, что так длина точная.
+4. [ЗАМЕЧАНИЕ] SelfTest: при «не сохранено» (Inconsistent/Implausible) старое значение профиля остаётся. Это расходится с текстом отчёта → сбрасывать в null.
+5. [ЗАМЕЧАНИЕ] Шкала HE-AAC: `metaRate = track.sampleRate` (KEY_SAMPLE_RATE экстрактора), а elst записан в шкале mdhd. Если экстрактор сообщает выходную частоту, а mdhd — частоту ядра, умножения ×2 не будет. RemuxCopier.previewFastTrim для HE-AAC вообще не пересчитывает D и выделение (они в выходной шкале редактора). → Передавать в GaplessInfo шкалу mdhd; для HE-AAC быстрая обрезка — после проверки на устройстве.
+6. [ЗАМЕЧАНИЕ] Калибровка с X < 0 (декодер добавляет кадры в начале) отвергается как неправдоподобная, хотя GaplessTrimmer умеет `head = D − X > D`. Для v1 это осторожно и приемлемо.
+7. [ЗАМЕЧАНИЕ] Player.kt `ensureTrack`: буфер ограничен сверху 120 мс даже если `getMinBufferSize` больше (бывает на устройствах с большим периодом HAL). Тогда AudioTrack может не создаться. → Верхняя граница `max(min, 120 мс)`.
+8. [ЗАМЕЧАНИЕ] Encoders.kt `feed`: если входной буфер меньше кадра, m = 0 → бесконечная очередь пустых буферов (на практике невозможно: KEY_MAX_INPUT_SIZE = 64 КБ).
+9. [ЗАМЕЧАНИЕ] DeviceVerifier: запасной допуск Opus фиксирован 960, а по timeline.md — «по размеру последнего пакета» (до 2880). Для энкодера Android (20 мс) это совпадает. `verifyCopy` для Opus-копий с пакетами 40/60 мс может дать ложную ошибку длительности → брать длину последнего пакета по TOC.
+10. [ЗАМЕЧАНИЕ] RemuxCopier: MP3 без тега LAME — D = 0, и у быстрой обрезки `delay = hidden − 529` может стать < 0. Прижимается с записью в журнал (известная проблема PMR, «FR-23, сырые выходы»).
+
+### Тесты
+`scripts/check.sh` → `OK (267 tests)`, `CHECK: OK` (из них 25 новых: AuditMediaMathTest 7, AuditPcmDecodeTest 6, AuditDecoderTrimTest 3, AuditCalibrationTest 9).

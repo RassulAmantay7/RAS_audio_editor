@@ -121,7 +121,8 @@ object TrackProbe {
     private fun wavOnly(src: OpenedSource): ProbeResult {
         val w = try { WavReader(src.source) } catch (e: CoreException) { throw e } catch (e: Exception) { throw CoreException(MSG_UNREADABLE, e) }
         val f = MediaFormat.createAudioFormat("audio/raw", w.spec.sampleRate, w.spec.channels)
-        val t = AudioTrackInfo(-1, 0, "audio/raw", null, true, w.spec.channels, w.channelMask, w.spec.sampleRate,
+        val t = AudioTrackInfo(-1, 0, "audio/raw", null, true, w.spec.channels,
+            com.rassul.audioeditor.core.pipeline.MediaMath.waveMaskToAndroid(w.channelMask), w.spec.sampleRate,
             w.spec.sampleRate * w.spec.channels * w.bitsPerSample, w.lengthFrames * 1_000_000L / w.spec.sampleRate,
             w.bitsPerSample, true, f)
         return ProbeResult(listOf(t), false, 0, true)

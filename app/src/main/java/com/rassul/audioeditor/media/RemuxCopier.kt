@@ -349,7 +349,7 @@ object RemuxCopier {
                     }
                     muxer.stop(); ok = true
                 } finally { muxer.release(); if (!ok) profile.log("MediaMuxer: копирование прервано") }
-                return c.result(ext, (track.durationUs * track.sampleRate + 500_000) / 1_000_000, track.sampleRate, 0)
+                return c.result(ext, com.rassul.audioeditor.core.pipeline.MediaMath.usToFrames(track.durationUs, track.sampleRate), track.sampleRate, 0)
             }
         }
     }
@@ -363,7 +363,7 @@ object RemuxCopier {
             if (!ex.advance()) return 1024
             val d = ex.sampleTime - t0
             if (d <= 0) return 1024
-            val f = ((d * track.sampleRate + 500_000) / 1_000_000).toInt()
+            val f = com.rassul.audioeditor.core.pipeline.MediaMath.usToFrames(d, track.sampleRate).toInt()
             return listOf(960, 1024, 2048).minByOrNull { Math.abs(it - f) }!!
         } catch (_: Exception) { return 1024 } finally { ex.release() }
     }
@@ -437,7 +437,7 @@ object RemuxCopier {
             pts[n] = p.ptsUs; fr[n] = p.frames; n++
         }
         // Пакеты без длительности в заголовке — по шагу PTS (последний — как предыдущий).
-        for (i in 0 until n) if (fr[i] <= 0) fr[i] = if (i + 1 < n) ((pts[i + 1] - pts[i]) * rate + 500_000).div(1_000_000).toInt() else if (i > 0) fr[i - 1] else 1024
+        for (i in 0 until n) if (fr[i] <= 0) fr[i] = if (i + 1 < n) com.rassul.audioeditor.core.pipeline.MediaMath.usToFrames(pts[i + 1] - pts[i], rate).toInt() else if (i > 0) fr[i - 1] else 1024
         val mp3 = if (kind == Kind.MP3 && rawFileKind(src, kind) == Kind.MP3) Mp3Scanner.scan(src.source) else null
         return Index(pts, fr, n, mp3)
     }

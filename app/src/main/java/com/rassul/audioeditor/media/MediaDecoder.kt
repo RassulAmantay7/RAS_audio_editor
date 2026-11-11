@@ -13,7 +13,10 @@ import com.rassul.audioeditor.core.io.RandomAccessSource
 import com.rassul.audioeditor.core.model.CancelledException
 import com.rassul.audioeditor.core.model.CoreException
 import com.rassul.audioeditor.core.model.Progress
+import com.rassul.audioeditor.core.pipeline.DecoderTrim
 import com.rassul.audioeditor.core.pipeline.GaplessTrimmer
+import com.rassul.audioeditor.core.pipeline.MediaMath
+import com.rassul.audioeditor.core.pipeline.PcmDecode
 import com.rassul.audioeditor.core.pipeline.PtsGapFiller
 import com.rassul.audioeditor.diag.DeviceProfile
 import java.io.FileDescriptor
@@ -88,7 +91,7 @@ object GaplessResolver {
             val i = indexOf(b, "OpusHead")
             if (i >= 0 && b.size >= i + 12) return b.u16le(i + 10)
         }
-        csd(f, "csd-1")?.let { b -> if (b.size >= 8) return ((b.u64le(0) * 48000L + 500_000_000L) / 1_000_000_000L).toInt() }
+        csd(f, "csd-1")?.let { b -> if (b.size >= 8) return MediaMath.nsToFrames(b.u64le(0), 48000).toInt() }
         return null
     }
 
@@ -196,7 +199,7 @@ class MediaDecoder(
             if (k > 0) hold!!.push(buf, (off + d) * ch, k) { b, o, m ->
                 if (out.size < m * ch) out = FloatArray(m * ch)
                 System.arraycopy(b, o, out, 0, m * ch)
-                for (i in 0 until m * ch) { val v = out[i]; if (v.isNaN() || v.isInfinite()) { out[i] = 0f; nan++ } }
+                nan += PcmDecode.sanitize(out, 0, m * ch)
                 frames += m
                 onPcm(out, m)
             }
@@ -252,18 +255,11 @@ class MediaDecoder(
                         ob.position(info.offset); ob.limit(info.offset + info.size)
                         ob.order(ByteOrder.nativeOrder())
                         val ch = f.channels
-                        val bps = when { f.isFloat || f.bits == 32 -> 4; f.bits == 24 -> 3; f.bits == 8 -> 1; else -> 2 }
+                        val bps = PcmDecode.bytesPerSample(f.bits, f.isFloat)
                         val n = info.size / (bps * ch)
                         if (pcm.size < n * ch) pcm = FloatArray(n * ch)
-                        when {
-                            f.isFloat -> ob.asFloatBuffer().get(pcm, 0, n * ch)
-                            f.bits == 16 -> { val sb = ob.asShortBuffer(); for (i in 0 until n * ch) pcm[i] = sb.get(i) / 32768f }
-                            f.bits == 32 -> { val ib = ob.asIntBuffer(); for (i in 0 until n * ch) pcm[i] = (ib.get(i) / 2147483648.0).toFloat() }
-                            f.bits == 24 -> { var p = info.offset; for (i in 0 until n * ch) {
-                                val v = (ob.get(p).toInt() and 0xFF) or ((ob.get(p + 1).toInt() and 0xFF) shl 8) or (ob.get(p + 2).toInt() shl 16)
-                                pcm[i] = v / 8388608f; p += 3 } }
-                            else -> for (i in 0 until n * ch) pcm[i] = ((ob.get(info.offset + i).toInt() and 0xFF) - 128) / 128f
-                        }
+                        // 16 бит ×1/32768, 24 бит ×1/2²³, 32 бит ×1/2³¹, 8 бит (u−128)/128 (dsp.md; аудит T21 — PcmDecode в :core).
+                        PcmDecode.toFloat(ob, info.offset, f.bits, f.isFloat, n * ch, pcm)
                         codec.releaseOutputBuffer(oi, false)
                         if (n > 0) {
                             // FR-7 (timeline.md ф. 7): разрыв → тишина, перекрытие → отбросить начало блока.
@@ -293,27 +289,15 @@ class MediaDecoder(
 
     private fun makeTrimmer(outRate: Int): GaplessTrimmer {
         val g = gapless.info
-        var delay = g?.delayFrames ?: 0L
-        var pad = g?.paddingFrames ?: 0L
-        // HE-AAC: значения в шкале частоты ядра (mdhd = 22,05/24 кГц), выход — вдвое выше (timeline.md «Приоритет источников»).
-        if (g != null && gapless.rate > 0 && outRate != gapless.rate && outRate % gapless.rate == 0) {
-            val k = outRate / gapless.rate
-            delay *= k; pad *= k
-            log("FR-26: задержка пересчитана ×$k к выходной частоте $outRate Гц")
-        }
-        // Хвост длиннее 1 с — явно ошибочные метаданные: не обрезать.
-        if (pad < 0 || pad > outRate) { if (pad != 0L) log("FR-26: хвост $pad кадров отброшен как неправдоподобный"); pad = 0 }
-        if (delay < 0 || delay > outRate) { log("FR-26: задержка $delay кадров отброшена как неправдоподобная"); delay = 0 }
-        val drops = decoderDropsOverride ?: profile?.decoderDropsFramesOrNull(mime) ?: defaultDecoderDrops(delay)
+        // Пересчёт HE-AAC, отсев неправдоподобных значений, «декодер сам отбрасывает» — DecoderTrim (:core, аудит T21).
+        val p = DecoderTrim.plan(g?.delayFrames ?: 0L, g?.paddingFrames ?: 0L, if (g != null) gapless.rate else 0, outRate,
+            decoderDropsOverride ?: profile?.decoderDropsFramesOrNull(mime), mime.equals("audio/opus", true))
+        p.notes.forEach { log(it) }
+        val delay = p.delay; val pad = p.padding; val drops = p.decoderDrops
         if (drops != 0L) log("FR-26: декодер $mime сам отбрасывает $drops кадров (профиль/допущение)")
         return GaplessTrimmer(delay, pad, drops, null)
     }
 
-    /**
-     * Допущение без калибровки: декодер Opus Android (C2SoftOpusDec) сам отбрасывает pre-skip (codec delay из csd-1),
-     * timeline.md FR-26 [предположение, проверить на устройстве самопроверкой]. Остальные — 0.
-     */
-    private fun defaultDecoderDrops(delay: Long): Long = if (mime.equals("audio/opus", true)) delay else 0L
 }
 
 /**

@@ -139,13 +139,13 @@ class DeviceVerifier(ctx: Context, private val profile: DeviceProfile = DevicePr
         val diff = Math.abs(n - e.frames)
         // Допуск FR-33: ±1 сэмпл; запасной режим FR-26 — ±1 кадр (AAC 1024, Opus 960) с записью в журнал.
         val frame = if (e.format == ExportFormat.M4A) 1024 else 960
-        return when {
-            diff <= 1 -> base
-            diff <= frame -> {
+        return when (com.rassul.audioeditor.core.pipeline.LengthTolerance.lossy(n, e.frames, frame)) {
+            com.rassul.audioeditor.core.pipeline.LengthTolerance.Verdict.OK -> base
+            com.rassul.audioeditor.core.pipeline.LengthTolerance.Verdict.WARN -> {
                 profile.log("FR-33: длина после декодирования $n, ожидалось ${e.frames} (запасной режим ±1 кадр)")
                 base.copy(warnings = base.warnings + "Длина после декодирования отличается на $diff сэмпл. (в пределах одного кадра).")
             }
-            else -> VerifyReport(false, failText(lenText(n, e.frames, e.sampleRate), false), actualFrames = n)
+            com.rassul.audioeditor.core.pipeline.LengthTolerance.Verdict.FAIL -> VerifyReport(false, failText(lenText(n, e.frames, e.sampleRate), false), actualFrames = n)
         }
     }
 
