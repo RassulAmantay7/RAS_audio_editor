@@ -47,7 +47,7 @@ object ExportPlanner {
     fun plan(source: PcmSpec, srcBits: Int, req: ExportRequest): ExportPlan {
         val notes = ArrayList<String>()
         val wanted = req.sampleRate ?: source.sampleRate
-        fun khz(r: Int): String = if (r % 1000 == 0) "${r / 1000} кГц" else "%.1f кГц".format(r / 1000.0).replace('.', ',')
+        fun khz(r: Int): String = if (r % 1000 == 0) "${r / 1000} кГц" else String.format(java.util.Locale.ROOT, "%.1f кГц", r / 1000.0).replace('.', ',')
         val rate = when (req.format) {
             ExportFormat.OPUS -> 48000.also { if (wanted != 48000) notes += "Opus всегда сохраняется с частотой 48 кГц (исходная ${khz(wanted)})." }
             ExportFormat.M4A, ExportFormat.FLAC -> {
@@ -334,9 +334,7 @@ object FastTrimPlanner {
  */
 object TimeText {
     fun ms(n: Long, fs: Int): Long = (2 * n * 1000 + fs) / (2L * fs)
-    fun format(n: Long, fs: Int): String {
-        val t = ms(n, fs)
-        val h = t / 3_600_000; val m = (t / 60_000) % 60; val s = (t / 1000) % 60; val x = t % 1000
-        return if (h > 0) "%d:%02d:%02d.%03d".format(h, m, s, x) else "%d:%02d.%03d".format(m, s, x)
-    }
+    /** Делегирует единому форматтеру TimeConv.format (дубликат убран). */
+    fun format(n: Long, fs: Int): String = com.rassul.audioeditor.core.time.TimeConv.format(n, fs)
+}
 }

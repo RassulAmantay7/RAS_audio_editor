@@ -57,7 +57,7 @@ object Verifier {
 
     // --- тексты (FR-33) ---
     private fun fmtTime(n: Long, fs: Int) = TimeConv.format(n, fs)
-    private fun khz(r: Int) = if (r % 1000 == 0) "${r / 1000} кГц" else "%.1f кГц".format(r / 1000.0).replace('.', ',')
+    private fun khz(r: Int) = if (r % 1000 == 0) "${r / 1000} кГц" else String.format(java.util.Locale.ROOT, "%.1f кГц", r / 1000.0).replace('.', ',')
     private fun chText(c: Int) = when (c) { 1 -> "моно"; 2 -> "стерео"; else -> "$c кан." }
     private fun what(e: VerifyExpect) = when (e.format) {
         ExportFormat.M4A -> "AAC"; ExportFormat.OPUS -> "Opus"

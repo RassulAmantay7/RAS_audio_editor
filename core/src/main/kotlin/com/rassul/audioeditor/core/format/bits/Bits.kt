@@ -167,4 +167,4 @@ fun ByteArray.u24be(i: Int): Int = (u8(i) shl 16) or (u8(i + 1) shl 8) or u8(i +
 fun ByteArray.u32be(i: Int): Long = (u16be(i).toLong() shl 16) or u16be(i + 2).toLong()
 fun ByteArray.u64be(i: Int): Long = (u32be(i) shl 32) or u32be(i + 4)
 fun ByteArray.ascii(i: Int, n: Int): String = String(CharArray(n) { (this[i + it].toInt() and 0xFF).toChar() })
-fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+fun ByteArray.toHex(): String = joinToString("") { String.format(java.util.Locale.ROOT, "%02x", it.toInt() and 0xFF) }

@@ -70,7 +70,7 @@ object Format {
         val h = t / 3600
         val m = (t / 60) % 60
         val s = t % 60
-        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+        return if (h > 0) String.format(java.util.Locale.ROOT, "%d:%02d:%02d", h, m, s) else String.format(java.util.Locale.ROOT, "%d:%02d", m, s)
     }
 
     /** «48 кГц», «44,1 кГц». */

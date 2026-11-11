@@ -308,7 +308,7 @@ class FakeEditorController(private val host: FakeAppController, name: String) : 
     override fun formatTime(frame: Long): String {
         val ms = (frame * 1000 + sr / 2) / sr
         val hh = ms / 3_600_000; val mm = (ms / 60_000) % 60; val ss = (ms / 1000) % 60; val mmm = ms % 1000
-        return if (hh > 0) "%d:%02d:%02d.%03d".format(hh, mm, ss, mmm) else "%d:%02d.%03d".format(mm, ss, mmm)
+        return if (hh > 0) String.format(java.util.Locale.ROOT, "%d:%02d:%02d.%03d", hh, mm, ss, mmm) else String.format(java.util.Locale.ROOT, "%d:%02d.%03d", mm, ss, mmm)
     }
 
     private fun push() {
