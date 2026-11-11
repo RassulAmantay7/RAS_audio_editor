@@ -1,0 +1,77 @@
+{
+ "note": "Сгенерировано scripts/gen_fixtures.py; длина и позиция импульса — в сэмплах исходной частоты",
+ "files": [
+  {
+   "file": "selftest_wav_44100_2ch_88200_imp22050.wav",
+   "codec": "wav",
+   "sampleRate": 44100,
+   "channels": 2,
+   "lengthFrames": 88200,
+   "impulseFrame": 22050
+  },
+  {
+   "file": "selftest_flac_44100_2ch_88200_imp22050.flac",
+   "codec": "flac",
+   "sampleRate": 44100,
+   "channels": 2,
+   "lengthFrames": 88200,
+   "impulseFrame": 22050
+  },
+  {
+   "file": "selftest_aac_44100_2ch_88200_imp22050.m4a",
+   "codec": "aac",
+   "sampleRate": 44100,
+   "channels": 2,
+   "lengthFrames": 88200,
+   "impulseFrame": 22050
+  },
+  {
+   "file": "selftest_mp3_44100_2ch_88200_imp22050.mp3",
+   "codec": "mp3",
+   "sampleRate": 44100,
+   "channels": 2,
+   "lengthFrames": 88200,
+   "impulseFrame": 22050
+  },
+  {
+   "file": "selftest_wav_48000_2ch_96000_imp24000.wav",
+   "codec": "wav",
+   "sampleRate": 48000,
+   "channels": 2,
+   "lengthFrames": 96000,
+   "impulseFrame": 24000
+  },
+  {
+   "file": "selftest_flac_48000_2ch_96000_imp24000.flac",
+   "codec": "flac",
+   "sampleRate": 48000,
+   "channels": 2,
+   "lengthFrames": 96000,
+   "impulseFrame": 24000
+  },
+  {
+   "file": "selftest_aac_48000_2ch_96000_imp24000.m4a",
+   "codec": "aac",
+   "sampleRate": 48000,
+   "channels": 2,
+   "lengthFrames": 96000,
+   "impulseFrame": 24000
+  },
+  {
+   "file": "selftest_mp3_48000_2ch_96000_imp24000.mp3",
+   "codec": "mp3",
+   "sampleRate": 48000,
+   "channels": 2,
+   "lengthFrames": 96000,
+   "impulseFrame": 24000
+  },
+  {
+   "file": "selftest_opus_48000_2ch_96000_imp24000.ogg",
+   "codec": "opus",
+   "sampleRate": 48000,
+   "channels": 2,
+   "lengthFrames": 96000,
+   "impulseFrame": 24000
+  }
+ ]
+}
