@@ -191,8 +191,10 @@ class Renderer(val source: PcmSource, val edits: EditList, val settings: RenderS
             ops[k] = prefix.resolveNormalize(ops[k] as EditOp.Normalize, sub)
         }
         val r = EditList(ops.toList())
-        map = RenderMap.build(source.length, r.ops, jointN, source.spec.channels)
+        val m = RenderMap.build(source.length, r.ops, jointN, source.spec.channels)
+        // Сначала resolved, затем map (оба @Volatile): читатель, увидевший isPrepared, видит и resolvedEdits.
         resolved = r
+        map = m
     }
 
     /**
