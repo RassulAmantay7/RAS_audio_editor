@@ -58,7 +58,7 @@ internal class HomeScreen(host: Host) : ScreenView(host) {
 
         val head = Kit.horizontal(c)
         val titles = Kit.vertical(c)
-        titles.addView(Kit.text(c, "Аудиоредактор", Tokens.TEXT_DISPLAY, Ui.colors.text, Tokens.FONT_BOLD).apply { isAccessibilityHeading = true })
+        titles.addView(Kit.text(c, "RAS audio editor", Tokens.TEXT_DISPLAY, Ui.colors.text, Tokens.FONT_BOLD).apply { isAccessibilityHeading = true })
         titles.addView(Kit.text(c, "Звук из видео и правка записей", Tokens.TEXT_BODY, Ui.colors.textSecondary))
         head.addView(titles, lp(0, Kit.WRAP, 1f))
         head.addView(Ui.iconButton(c, Icon.SETTINGS, "Настройки") { host.showSettings() })
