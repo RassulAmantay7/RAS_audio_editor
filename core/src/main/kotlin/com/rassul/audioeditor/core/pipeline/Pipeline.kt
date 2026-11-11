@@ -337,4 +337,3 @@ object TimeText {
     /** Делегирует единому форматтеру TimeConv.format (дубликат убран). */
     fun format(n: Long, fs: Int): String = com.rassul.audioeditor.core.time.TimeConv.format(n, fs)
 }
-}
