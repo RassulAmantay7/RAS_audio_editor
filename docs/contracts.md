@@ -32,3 +32,7 @@
 | ui-designer | `app/.../ui/**`, `MainActivity.kt`, `docs/design.md`, `res/**` |
 | MEDIA | `app/.../{media,export,store,diag,editor}/**` (кроме Controllers.kt), `App.kt` |
 | главная сессия | Gradle, манифест, CI, `model/`, `io/`, контракты, docs |
+
+## Заметки аудита для следующих агентов
+- **MEDIA (декодер):** любые NaN/Inf из MediaCodec заменять на 0 до записи в кэш PCM — LoudnessMeter не устойчив к NaN (аудит T13).
+- **EDIT (ExportPipeline):** для 24 бит `Quantizer(24, dither = false)`; дизеринг только для 16 бит (FR-C7).
