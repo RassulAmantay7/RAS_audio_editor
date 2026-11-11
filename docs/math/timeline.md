@@ -241,3 +241,50 @@
 ## Решения главной сессии по вопросам рецензента
 - **Формат времени (единый):** до 1 часа — `м:сс.ммм` (например `0:00.981`, `12:34.567`), от 1 часа — `ч:мм:сс.ммм`. Ввод принимает оба вида и «сс.ммм».
 - **Сетка кривой сглаживания стыка** — согласуется с docs/math/dsp.md (FR-C3) после его готовности; при расхождении приоритет у dsp.md.
+
+---
+## Аудит кода форматов (code-formula-auditor)
+
+Объект: `core/.../format/**`, `core/.../pipeline/Pipeline.kt` (агент FORMATS). Тесты: `core/src/test/kotlin/com/rassul/audioeditor/core/audit/fmt/*Test.kt` (32 теста, из них 9 с ffmpeg/ffprobe через `T.need`, т.е. Assume/`REQUIRE_TOOLS`). Случайные контрольные примеры: `tools/ref/audit_fmt_gen.py` → `core/src/test/resources/ref/audit_fmt_vectors.json`, ожидания посчитаны функциями `timeline_ref.py` (fast_trim_plan/message, gap_fill, mp4_edit, mp4_input_trim, space_required_bytes, format_samples).
+
+**Вердикт: ЕСТЬ РАСХОЖДЕНИЯ** (одно важное исправлено; остальное — замечания).
+
+| Формула / правило | Код | Статус |
+|---|---|---|
+| ф. 10: mvhd_ts = mdhd_ts = fs; elst media_time (mdhd), segment_duration (mvhd); v1 при > 32 бит | `mp4/Mp4Writer.kt` `Mp4Timing.compute`, `buildMoov` | ✓ (200 случ. наборов = эталон; ffprobe `duration_ts` = N ±0 при N кратном/некратном 1024, delay 0/1024/2112) |
+| stts по конвенции ffmpeg, Σ = delay + N; sgpd/sbgp roll −1; iTunSMPB | `Mp4Writer.kt` | ✓ |
+| Приоритет на входе elst → iTunSMPB → Σstts | `Formats.kt` `GaplessProbe.mp4Trim` | ✓ = `mp4_input_trim` (200 случ.) |
+| Ogg: страницы, lacing, continued/BOS/EOS, гранула = Σ длительностей завершённых пакетов (вкл. pre-skip), −1 без завершённых; конечная = pre_skip + N₄₈ | `ogg/Ogg.kt` | ✓ (60 случ. наборов, пакеты до 140 000 байт; независимый разбор + ffprobe без ошибок демультиплексора; ffmpeg декодирует ровно N₄₈) |
+| CRC-32 Ogg 0x04C11DB7, init 0, без отражения/xorout | `bits/Bits.kt` `Crc.crc32Ogg` | ✓ (check 0x89A1897F, побитовая сверка) |
+| CRC-8 0x07 / CRC-16 0x8005 FLAC; CRC-16/ARC тега LAME | `Crc.crc8/crc16/crc16Arc` | ✓ (0xF4 / 0xFEE8 / 0xBB3D) |
+| MD5 FLAC: знаковые LE, ⌈bps/8⌉ байт (24 → 3), чередование | `flac/FlacEncoder.kt` `updateMd5` | ✓ (MD5 посчитан в тесте независимо = STREAMINFO = MD5 вывода ffmpeg) |
+| side +1 бит; mid = (L+R)>>1; 24 бит + side без переполнения (\|остаток\| ≤ 2²⁸) | `FlacEncoder.encodeFrame/fixedResidual` | ✓ (экстремальные ±max, L=R, L=−R) |
+| Rice: метод 0 (4 бит, ≤ 14) / метод 1 (5 бит, ≤ 30), escape не используется (допустимо) | `planRice/bestK/writeRice` | ✓ (полный шум 24 бит → k > 14) |
+| Коды блока/частоты/разрядности, номер кадра «UTF-8» (1–3 байта проверены) | `writeHeader/writeUtf8Number` | ✓ (блоки 16…65 535, fs 8 к…192 к и нестандартные) |
+| Перенумерация кадров, CRC пересчитаны, MD5 = 0, total_samples | `flac/FlacFrames.kt` | ✓ (отрезки из середины, ffmpeg бит в бит) |
+| ф. 13 + разгон: AAC/AC-3 1, MP3 ≥ 2 (bit reservoir), Opus ≥ 3840; hidden = A − u_{i_s}; текст сдвига по показанным мс | `Pipeline.kt` `FastTrimPlanner`, `raw/Mp3.kt` `warmupFrames` | ✓ (300 случ. = эталон вкл. текст; свойство на 3000 случ.: [A,B) ⊇ [a,b), расширение < пакета, минимальность разгона Opus) |
+| Info-кадр MP3: delay/padding по 12 бит на +21, CRC по байтам до поля (190 для MPEG-1 стерео) | `Mp3Scanner.buildInfoFrame` | ✓ (границы 0/4095, 4096 → ошибка; 12 случайных отрезков → ffmpeg ровно B − A, SNR > 60 дБ) |
+| ф. 7 PtsGapFiller: порог строгий, позиция от pts₀, перекрытия | `PtsGapFiller` | ✓ (300 случ. = `gap_fill`; 100 000 блоков без дрейфа; ровно ±1,000 мс — не разрыв) |
+| FR-26 GaplessTrimmer: полезная длина | `GaplessTrimmer.validLength` | **✗ → исправлено** (см. ниже) |
+| ф. 6 SpaceEstimator: 891 200 000 Б, «нужно 892 МБ» | `SpaceEstimator` | ✓ |
+| FR-27 FileNaming | `FileNaming` | ✓ после исправления предела длины |
+| FR-6a, Д-14 (AAC ≤ 6·fs·C) | `ExportPlanner`, `ExtractPlanner` | ✓ (все частоты AAC × 1–8 кан.) |
+| WavReader: EXTENSIBLE (PCM/float, 24 в 32), RF64/ds64, 8 бит беззнаковые, float64 | `wav/Wav.kt` | ✓ (вкл. RF64 от ffmpeg `-rf64 always`) |
+| Единый форматтер времени | `TimeText` vs `TimeConv.format` | **дубликат заменён** делегированием |
+
+**Исправлено (локально):**
+- [ВАЖНО] `Pipeline.kt` `GaplessTrimmer.validLength = T − delay − padding`, хотя T — длина выхода декодера уже **после** его собственного отбрасывания. При `decoderAlreadyDropsFrames = 529` (MP3) терялось 529 сэмплов с конца — та самая «двойная обрезка». Теперь `T − head − padding`, head = max(0, delay − уже_отброшено). Тест `gaplessTrimmerNoDoubleTrim`.
+- [ЗАМЕЧАНИЕ] `TimeText.format` использовал `String.format` (цифры зависят от локали, например ar → «٠:٠٠.٠٠٠»; при n < 0 расходился с TimeConv). Теперь он делегирует `TimeConv.format`, тест на 400 векторах.
+- [ЗАМЕЧАНИЕ] `ExportPlanner.khz`: «%.1f» давал «11,0 кГц» для 11 025 Гц и «22,1» для 22 050. Теперь вывод точный и не зависит от локали: «11,025 кГц», «22,05 кГц».
+- [ЗАМЕЧАНИЕ] `FileNaming`: `take(180)` ограничивал символы, а предел ФС — 255 байт: 180 кириллических символов = 360 байт. Теперь имя ограничено 180 байтами UTF-8, суррогатные пары не разрываются.
+
+**Не исправлено (в отчёт):**
+- [ВАЖНО] `Mp3Scanner.buildInfoFrame` требует delay = hidden − 529 ≤ 4095, т.е. hidden ≤ 4624. При W ≥ 4 кадров разгона (низкий битрейт, большой `main_data_begin`) получается `IllegalArgumentException`. У `FastTrimPlanner`/вызывающего нет запасного пути: показать сдвиг начала, как для AC-3. В core также нет функции, считающей delay/padding Info-кадра (формулу пишет вызывающий; проверена только в тестах). Рекомендация: `Mp3Scanner.infoDelayPadding(plan, K)` с понятной ошибкой.
+- [ЗАМЕЧАНИЕ] `GaplessProbe.mp4Trim` (и эталон `mp4_input_trim`): допуск «в пределах тика» = `mdTs / mvTs` в целых. При mvhd_ts > mdhd_ts он равен 0, и длина отличается на ±1 сэмпл (например, mvhd 30 000, fs 22 050). Это в пределах допуска FR-33 (±1). Точнее был бы ⌈mdTs/mvTs⌉; правка нужна в эталоне и в коде одновременно (решение PMR).
+- [ЗАМЕЧАНИЕ] `Mp4Timing.compute` при K·F − (delay + N) ≥ F (пакетов больше нужного) пишет все stts = F, и тогда Σstts ≠ delay + N: структурная проверка FR-33 не пройдёт. Сейчас вызывающий так не делает. Лучше `require`.
+- [ЗАМЕЧАНИЕ] `Mp4AudioTrack.read`: `IntArray(n)` по stsz/stco из файла без проверки n против размера бокса — риск OOM на испорченном файле. `GaplessProbe.probe` не ловит `RuntimeException`, в отличие от `FileFacts.mp4Audio`.
+- [ЗАМЕЧАНИЕ] ffmpeg 6.1 (`flac_parser`) молча теряет FLAC-кадры больше ~200 КБ, в том числе свои (`-frame_size 32768`, 6 кан. → 0 сэмплов). `FlacEncoder` допускает блок до 65 535. По умолчанию блок 4096 (кадр ≤ ~100 КБ при 8 кан./24 бит), так что это не ошибка. Рекомендация: ограничить блок субсетом RFC 9639 (≤ 4608 при fs ≤ 48 кГц, ≤ 16 384 иначе).
+- [ЗАМЕЧАНИЕ] `ExportPlanner`: FLAC с недопустимой разрядностью превращается в «будет 24 бит» даже при 16-битном исходнике. Логичнее брать defBits.
+- [ЗАМЕЧАНИЕ] `OpusToc.samples48`: при c = 3 и M = 0 возвращает 0, без ошибки. Писатель отсеивает (`frames48k ≥ 1`), а читатели суммируют 0 — безвредно.
+
+Запуск: `cd /home/claude/wt-ae-cfa-fmt && scripts/check.sh core` → `OK (125 tests)`, `CHECK: OK`.

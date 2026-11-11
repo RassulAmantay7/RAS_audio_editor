@@ -1,6 +1,7 @@
 package com.rassul.audioeditor.core.pipeline
 
 import com.rassul.audioeditor.core.model.PcmSpec
+import com.rassul.audioeditor.core.time.TimeConv
 
 /* КОНТРАКТ (реализация — агент FORMATS, кроме ExportPipeline — агент EDIT). FR-7, 10, 23, 24, 26, 27. */
 
@@ -47,7 +48,9 @@ object ExportPlanner {
     fun plan(source: PcmSpec, srcBits: Int, req: ExportRequest): ExportPlan {
         val notes = ArrayList<String>()
         val wanted = req.sampleRate ?: source.sampleRate
-        fun khz(r: Int): String = if (r % 1000 == 0) "${r / 1000} кГц" else String.format(java.util.Locale.ROOT, "%.1f кГц", r / 1000.0).replace('.', ',')
+        // Точное значение без округления и без зависимости от локали: 11025 → «11,025 кГц», 22050 → «22,05 кГц».
+        fun khz(r: Int): String = if (r % 1000 == 0) "${r / 1000} кГц"
+            else "${r / 1000},${(r % 1000).toString().padStart(3, '0').trimEnd('0')} кГц"
         val rate = when (req.format) {
             ExportFormat.OPUS -> 48000.also { if (wanted != 48000) notes += "Opus всегда сохраняется с частотой 48 кГц (исходная ${khz(wanted)})." }
             ExportFormat.M4A, ExportFormat.FLAC -> {
@@ -129,7 +132,7 @@ object ExtractPlanner {
 object FileNaming {
     /** «<base>_edit.<ext>», при занятости — «<base>_edit (2).<ext>», (3)… existing — имена в папке (сравнение без учёта регистра). */
     fun next(baseName: String, suffix: String, ext: String, existing: Set<String>): String {
-        val base = baseName.substringBeforeLastDotIfExt().replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim().ifEmpty { "audio" }.take(180)
+        val base = baseName.substringBeforeLastDotIfExt().replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim().ifEmpty { "audio" }.limitUtf8(180)
         val suf = if (suffix.isEmpty()) "" else "_" + suffix.trimStart('_')
         val taken = existing.mapTo(HashSet()) { it.lowercase() }
         var i = 1
@@ -138,6 +141,21 @@ object FileNaming {
             if (name.lowercase() !in taken) return name
             i++
         }
+    }
+
+    /**
+     * Обрезать до maxBytes байт UTF-8, не разрывая суррогатную пару: предел имени файла на ext4/FAT/sdcardfs —
+     * 255 байт, а не символов (кириллица — 2 байта на символ, take(180) давало до 360 байт).
+     */
+    private fun String.limitUtf8(maxBytes: Int): String {
+        var bytes = 0; var i = 0
+        while (i < length) {
+            val cp = codePointAt(i); val n = Character.charCount(cp)
+            val b = when { cp < 0x80 -> 1; cp < 0x800 -> 2; cp < 0x10000 -> 3; else -> 4 }
+            if (bytes + b > maxBytes) break
+            bytes += b; i += n
+        }
+        return substring(0, i)
     }
 
     /** Убрать расширение исходника («видео.mp4» → «видео»), если оно похоже на расширение (1–5 символов после точки). */
@@ -222,8 +240,12 @@ class GaplessTrimmer(
     val expectedTotalFrames: Long?,
 ) {
     private val head = maxOf(0L, delayFrames - decoderAlreadyDropsFrames)
-    /** Полезная длина, если известна. */
-    val validLength: Long? = expectedTotalFrames?.let { maxOf(0L, it - delayFrames - paddingFrames) }
+    /**
+     * Полезная длина, если известна. expectedTotalFrames — в координатах выхода декодера (уже без того, что он
+     * отбросил сам), поэтому вычитается только остаток задержки head, а не вся delay: иначе часть, отброшенная
+     * декодером, вычиталась бы дважды (аудит code-formula-auditor, timeline.md FR-26 «двойная обрезка»).
+     */
+    val validLength: Long? = expectedTotalFrames?.let { maxOf(0L, it - head - paddingFrames) }
     private var pos = 0L        // позиция начала текущего блока на выходе декодера
     var emitted = 0L; private set
 
@@ -328,12 +350,11 @@ object FastTrimPlanner {
 }
 
 /**
- * Показ времени (timeline.md ф. 2 и «Решения главной сессии»): ms = ⌊(2·n·1000 + fs)/(2·fs)⌋ — округление ДО разбиения;
- * < 1 ч — «м:сс.ммм», ≥ 1 ч — «ч:мм:сс.ммм». Совпадает с TimeConv.format (зона DSP); дублируется здесь, чтобы
- * :pipeline не зависел от порядка готовности модулей. После слияния можно заменить вызовом TimeConv.format.
+ * Показ времени (timeline.md ф. 2 и «Решения главной сессии»). Единый форматтер приложения — TimeConv.format;
+ * здесь только делегирование (раньше был дубликат на String.format — зависел от локали и расходился при n < 0).
  */
 object TimeText {
+    /** ms = ⌊(2·n·1000 + fs)/(2·fs)⌋ — округление half-up ДО разбиения на поля (n ≥ 0). */
     fun ms(n: Long, fs: Int): Long = (2 * n * 1000 + fs) / (2L * fs)
-    /** Делегирует единому форматтеру TimeConv.format (дубликат убран). */
-    fun format(n: Long, fs: Int): String = com.rassul.audioeditor.core.time.TimeConv.format(n, fs)
+    fun format(n: Long, fs: Int): String = TimeConv.format(n, fs)
 }
