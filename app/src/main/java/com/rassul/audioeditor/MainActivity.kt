@@ -30,7 +30,7 @@ import com.rassul.audioeditor.ui.screenRoot
 class MainActivity : Activity() {
     companion object {
         /** true — интерфейс на фейках (FakeAppController); false — берём контроллер из Application (AppControllerHost). */
-        const val USE_FAKE = true
+        const val USE_FAKE = false
         private const val REQ_NOTIF = 71
         private const val PREFS = "ui"
         private const val KEY_NOTIF_ASKED = "notif_asked"
@@ -92,11 +92,8 @@ class MainActivity : Activity() {
     /** VIEW («Открыть с помощью») и SEND («Поделиться») — FR-1; fromShare = true (для FR-31). */
     private fun handleIntent(i: Intent?) {
         i ?: return
-        val uri: Uri? = when (i.action) {
-            Intent.ACTION_VIEW -> i.data
-            Intent.ACTION_SEND -> i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-            else -> null
-        }
+        // SEND: EXTRA_STREAM, иначе data (некоторые галереи); VIEW: data (FR-1).
+        val uri: Uri? = com.rassul.audioeditor.media.SourceOpener.fromIntent(i)?.uri
         if (uri != null) {
             setIntent(Intent(Intent.ACTION_MAIN))
             ui.clearSub()
