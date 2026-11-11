@@ -49,7 +49,24 @@ class WavWriter(sink: SeekableSink, spec: PcmSpec, val format: WavSampleFormat) 
 }
 
 /** Свой FLAC-энкодер + контейнер .flac (16 или 24 бит), MD5 в STREAMINFO. */
-class FlacWriter(sink: SeekableSink, spec: PcmSpec, val bitsPerSample: Int, val blockSize: Int = 4096) : PcmWriter {
+class FlacWriter(
+    sink: SeekableSink, spec: PcmSpec, val bitsPerSample: Int, val blockSize: Int = 4096,
+    /** Разрешить блок вне субсета RFC 9639 (до 65 535) — только для тестов самого энкодера. */
+    allowNonSubset: Boolean = false,
+) : PcmWriter {
+    init {
+        if (!allowNonSubset) {
+            val max = maxSubsetBlockSize(spec.sampleRate)
+            require(blockSize <= max) {
+                "Размер блока FLAC $blockSize больше допустимого $max для ${spec.sampleRate} Гц (субсет RFC 9639 §7): " +
+                    "такие файлы не воспроизводят многие плееры."
+            }
+        }
+    }
+    companion object {
+        /** Субсет RFC 9639 §7 «Streamable subset»: блок ≤ 16 384, а при fs ≤ 48 кГц — ≤ 4608. */
+        fun maxSubsetBlockSize(sampleRate: Int): Int = if (sampleRate <= 48_000) 4608 else 16_384
+    }
     private val enc = FlacEncoder(sink, spec.sampleRate, spec.channels, bitsPerSample, blockSize)
     override fun writeInt(samples: IntArray, frames: Int) = enc.write(samples, frames)
     override fun finish() = enc.finish()
@@ -130,12 +147,15 @@ object GaplessProbe {
     fun probe(src: RandomAccessSource): GaplessInfo? {
         val h = Src.readUpTo(src, 0, 12)
         if (h.size < 12) return null
-        return when {
-            h.ascii(4, 4) == "ftyp" -> probeMp4(src)
-            h.ascii(0, 4) == "OggS" -> probeOgg(src)
-            h.ascii(0, 3) == "ID3" || ((h[0].toInt() and 0xFF) == 0xFF && (h[1].toInt() and 0xE0) == 0xE0) -> probeMp3(src)
-            else -> null
-        }
+        // Повреждённый файл (счётчики, обрезанные боксы/страницы) — сведений о задержке нет, а не падение (как FileFacts).
+        return try {
+            when {
+                h.ascii(4, 4) == "ftyp" -> probeMp4(src)
+                h.ascii(0, 4) == "OggS" -> probeOgg(src)
+                h.ascii(0, 3) == "ID3" || ((h[0].toInt() and 0xFF) == 0xFF && (h[1].toInt() and 0xE0) == 0xE0) -> probeMp3(src)
+                else -> null
+            }
+        } catch (e: RuntimeException) { null }
     }
 
     /** Длина и задержка MP4 по приоритету timeline.md: elst (точно) → iTunSMPB → Σstts − media_time. */

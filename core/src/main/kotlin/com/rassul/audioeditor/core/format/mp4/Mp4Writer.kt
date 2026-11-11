@@ -29,24 +29,25 @@ data class Mp4Timing(
     companion object {
         /**
          * nPackets — K, frame — F (1024 для AAC-LC), delay — media_time, nOut — N.
-         * Условие: (K−1)·F < delay + N ≤ K·F (иначе пакетов больше/меньше, чем нужно — ошибка вызывающего).
+         * Условие: (K−1)·F < delay + N ≤ K·F (иначе пакетов больше/меньше, чем нужно — IllegalArgumentException).
          * segment_duration = N, если mvhd_ts = fs; иначе round_half_up(N·mvhd_ts/fs) (ISO/IEC 14496-12 §8.6.6, timeline.md ф.10).
          */
         fun compute(nOut: Long, delay: Long, fs: Int, nPackets: Int, frame: Int, mvhdTs: Int = fs): Mp4Timing {
             require(nOut >= 0 && delay >= 0 && nPackets >= 0)
             val total = delay + nOut
             require(total <= nPackets.toLong() * frame) { "delay+N=$total > K·F=${nPackets.toLong() * frame}" }
+            // Σstts должна быть ровно delay + N (конвенция ffmpeg, timeline.md «FR-25»; проверка FR-33): последний пакет
+            // получает длительность delay + N − (K−1)·F ∈ [1, F]. Лишние пакеты сделать этого не дают — ошибка вызывающего.
+            require(nPackets == 0 || total > (nPackets - 1).toLong() * frame) {
+                "Пакетов больше, чем нужно: K=$nPackets по $frame сэмплов, а delay+N=$total укладывается в " +
+                    "${(total + frame - 1) / frame} — уберите лишние пакеты в конце (иначе Σstts ≠ delay+N)."
+            }
             val seg = if (mvhdTs == fs) nOut else (nOut * mvhdTs + fs / 2) / fs
             val stts = ArrayList<LongArray>()
             if (nPackets > 0) {
                 val last = total - (nPackets - 1).toLong() * frame
-                if (last in 1..frame.toLong()) {
-                    if (nPackets > 1) stts += longArrayOf((nPackets - 1).toLong(), frame.toLong())
-                    if (last == frame.toLong() && stts.isNotEmpty()) stts[0][0]++ else stts += longArrayOf(1, last)
-                } else {
-                    // Пакетов больше, чем нужно для delay+N: все по F (хвост обрежет elst).
-                    stts += longArrayOf(nPackets.toLong(), frame.toLong())
-                }
+                if (nPackets > 1) stts += longArrayOf((nPackets - 1).toLong(), frame.toLong())
+                if (last == frame.toLong() && stts.isNotEmpty()) stts[0][0]++ else stts += longArrayOf(1, last)
             }
             val mdhdDur = stts.sumOf { it[0] * it[1] }
             return Mp4Timing(mvhdTs, fs, delay, seg, stts, mdhdDur, nPackets.toLong() * frame - total)

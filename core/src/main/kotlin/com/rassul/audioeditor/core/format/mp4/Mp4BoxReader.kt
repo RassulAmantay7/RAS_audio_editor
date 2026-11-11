@@ -61,9 +61,29 @@ object Mp4BoxReader {
         return out
     }
 
-    fun body(src: RandomAccessSource, b: Box, max: Int = Int.MAX_VALUE): ByteArray =
-        Src.readFully(src, b.bodyOffset, minOf(b.bodySize, max.toLong()).toInt()) ?: ByteArray(0)
+    /** Предел тела бокса, читаемого целиком (stsz 64 Мсэмплов ≈ 256 МБ; больше — признак повреждения). */
+    const val MAX_BODY = 256 shl 20
+
+    fun body(src: RandomAccessSource, b: Box, max: Int = Int.MAX_VALUE): ByteArray {
+        val n = minOf(b.bodySize, max.toLong())
+        if (n < 0 || n > MAX_BODY) throw Mp4FormatException("бокс ${b.type}: размер тела $n байт вне допустимого")
+        return Src.readFully(src, b.bodyOffset, n.toInt()) ?: ByteArray(0)
+    }
+
+    /**
+     * Защита от повреждённого счётчика записей (ISO/IEC 14496-12: entry_count — 32 бит без знака):
+     * header + n·entry должно поместиться в тело бокса — проверяется ДО выделения массива на n элементов.
+     */
+    fun entryCount(b: ByteArray, at: Int, entry: Int, header: Int, type: String): Int {
+        if (at + 4 > b.size) throw Mp4FormatException("бокс $type обрезан")
+        val n = b.u32be(at)
+        if (header + n * entry > b.size) throw Mp4FormatException("бокс $type: $n записей не помещаются в ${b.size} байт")
+        return n.toInt()
+    }
 }
+
+/** Повреждённая структура MP4 (читатели ловят как RuntimeException и считают файл нечитаемым). */
+class Mp4FormatException(msg: String) : RuntimeException(msg)
 
 /** Сведения о звуковой дорожке MP4 (первая дорожка с hdlr 'soun'). */
 class Mp4AudioTrack(
@@ -126,7 +146,7 @@ class Mp4AudioTrack(
             val edits = ArrayList<LongArray>()
             trak.path("edts", "elst")?.let { e ->
                 val b = Mp4BoxReader.body(src, e)
-                val v = b.u8(0); val n = b.u32be(4).toInt()
+                val v = b.u8(0); val n = Mp4BoxReader.entryCount(b, 4, if (b.u8(0) == 1) 20 else 12, 8, "elst")
                 var p = 8
                 for (i in 0 until n) {
                     if (v == 1) { if (p + 20 > b.size) break; edits += longArrayOf(b.u64be(p), b.u64be(p + 8)); p += 20 }
@@ -147,33 +167,42 @@ class Mp4AudioTrack(
             }
             val stts = ArrayList<LongArray>()
             stbl.child("stts")?.let { b0 ->
-                val b = Mp4BoxReader.body(src, b0); val n = b.u32be(4).toInt()
+                val b = Mp4BoxReader.body(src, b0); val n = Mp4BoxReader.entryCount(b, 4, 8, 8, "stts")
                 for (i in 0 until n) { val p = 8 + i * 8; if (p + 8 > b.size) break; stts += longArrayOf(b.u32be(p), b.u32be(p + 4)) }
             }
             // stsz (§8.7.3)
             var sizes = IntArray(0)
             stbl.child("stsz")?.let { b0 ->
                 val b = Mp4BoxReader.body(src, b0)
-                val fixed = b.u32be(4).toInt(); val n = b.u32be(8).toInt()
-                sizes = if (fixed != 0) IntArray(n) { fixed } else IntArray(n) { b.u32be(12 + it * 4).toInt() }
+                if (b.size < 12) throw Mp4FormatException("бокс stsz обрезан")
+                val fixed = b.u32be(4)
+                val n = if (fixed == 0L) Mp4BoxReader.entryCount(b, 8, 4, 12, "stsz") else {
+                    // Общий размер: n не ограничен телом бокса — ограничиваем размером файла (n сэмплов по fixed байт).
+                    val c = b.u32be(8)
+                    if (fixed > Int.MAX_VALUE || c * fixed > src.size) throw Mp4FormatException("stsz: $c сэмплов по $fixed байт больше файла")
+                    c.toInt()
+                }
+                sizes = if (fixed != 0L) IntArray(n) { fixed.toInt() } else IntArray(n) { b.u32be(12 + it * 4).toInt() }
             }
             // stco/co64 + stsc → смещения сэмплов (§8.7.4–8.7.5)
             val chunkOff: LongArray = stbl.child("stco")?.let { b0 ->
-                val b = Mp4BoxReader.body(src, b0); LongArray(b.u32be(4).toInt()) { b.u32be(8 + it * 4) }
+                val b = Mp4BoxReader.body(src, b0); LongArray(Mp4BoxReader.entryCount(b, 4, 4, 8, "stco")) { b.u32be(8 + it * 4) }
             } ?: stbl.child("co64")?.let { b0 ->
-                val b = Mp4BoxReader.body(src, b0); LongArray(b.u32be(4).toInt()) { b.u64be(8 + it * 8) }
+                val b = Mp4BoxReader.body(src, b0); LongArray(Mp4BoxReader.entryCount(b, 4, 8, 8, "co64")) { b.u64be(8 + it * 8) }
             } ?: LongArray(0)
             val stsc = ArrayList<IntArray>()
             stbl.child("stsc")?.let { b0 ->
-                val b = Mp4BoxReader.body(src, b0); val n = b.u32be(4).toInt()
+                val b = Mp4BoxReader.body(src, b0); val n = Mp4BoxReader.entryCount(b, 4, 12, 8, "stsc")
                 for (i in 0 until n) { val p = 8 + i * 12; stsc += intArrayOf(b.u32be(p).toInt(), b.u32be(p + 4).toInt()) }
             }
             val offsets = LongArray(sizes.size)
             var si = 0
+            var ei = 0; var spc = 0
             for (c in chunkOff.indices) {
+                if (si >= sizes.size) break
                 val chunkNo = c + 1
-                var spc = 0
-                for (e in stsc) if (e[0] <= chunkNo) spc = e[1]
+                // stsc упорядочен по first_chunk (§8.7.4): один проход вместо O(чанков·записей) на повреждённом файле.
+                while (ei < stsc.size && stsc[ei][0] <= chunkNo) { spc = stsc[ei][1]; ei++ }
                 var o = chunkOff[c]
                 for (k in 0 until spc) { if (si >= sizes.size) break; offsets[si] = o; o += sizes[si]; si++ }
             }

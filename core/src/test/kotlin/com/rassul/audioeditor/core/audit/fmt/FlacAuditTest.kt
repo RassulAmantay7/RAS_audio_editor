@@ -43,7 +43,7 @@ class FlacAuditTest {
 
     private fun encode(spec: PcmSpec, bits: Int, s: IntArray, block: Int, chunk: Int): ByteArray {
         val sink = ByteArraySink()
-        val w = FlacWriter(sink, spec, bits, block)
+        val w = FlacWriter(sink, spec, bits, block, allowNonSubset = true)  // проверяется сам энкодер, вкл. блоки вне субсета
         val n = s.size / spec.channels
         var p = 0
         while (p < n) { val k = minOf(chunk, n - p); w.writeInt(s.copyOfRange(p * spec.channels, (p + k) * spec.channels), k); p += k }

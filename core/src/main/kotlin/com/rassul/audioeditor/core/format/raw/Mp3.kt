@@ -6,6 +6,8 @@ import com.rassul.audioeditor.core.format.bits.ascii
 import com.rassul.audioeditor.core.format.bits.u32be
 import com.rassul.audioeditor.core.format.bits.u8
 import com.rassul.audioeditor.core.io.RandomAccessSource
+import com.rassul.audioeditor.core.pipeline.FastTrimPlan
+import com.rassul.audioeditor.core.pipeline.FastTrimPlanner
 
 /*
  * MPEG-1/2/2.5 Audio (ISO/IEC 11172-3 §2.4.1.3, ISO/IEC 13818-3 §2.4.1.3): заголовок кадра 32 бит,
@@ -68,6 +70,19 @@ class Mp3Frame(offset: Long, size: Int, val header: Mp3Header, val mainDataBegin
 /** Тег Xing/Info (+ LAME). frames — число аудиокадров без кадра Info; delay/padding — из LAME (12 + 12 бит). */
 data class Mp3InfoTag(val frameOffset: Long, val frameSize: Int, val isVbr: Boolean, val frames: Long?, val bytes: Long?,
                       val encoder: String?, val delay: Int?, val padding: Int?)
+
+/** delay/padding для тега LAME Info-кадра (по 12 бит, 0..4095). */
+data class Mp3InfoParams(val delay: Int, val padding: Int)
+
+/**
+ * План быстрой обрезки сырого .mp3 (FR-23): что копировать и что записать в Info-кадр.
+ * warmupHidden = false — запасной путь: разгон длиннее, чем позволяет скрыть тег LAME (hidden > 4624),
+ * поэтому фактическое начало сдвинуто раньше выделения и это сказано в plan.message.
+ */
+class Mp3FastTrimPlan(val plan: FastTrimPlan, val info: Mp3InfoParams, val warmupHidden: Boolean) {
+    /** K — число аудиокадров без Info-кадра. */
+    val audioFrames: Int get() = plan.lastPacket - plan.firstPacket + 1
+}
 
 class Mp3Stream(val frames: List<Mp3Frame>, val info: Mp3InfoTag?, val id3v2Size: Long, val resyncs: Int) {
     val sampleRate: Int get() = frames.firstOrNull()?.sampleRate ?: 0
@@ -185,6 +200,60 @@ object Mp3Scanner {
         return minOf(ia, maxOf(2, 1 + r))
     }
 
+    /** Наибольшее скрываемое тегом LAME начало: delay ≤ 4095 (12 бит) → hidden ≤ 4095 + 529 = 4624 (timeline.md «FR-23, сырые выходы»). */
+    const val MAX_HIDDEN = 4095 + MP3_DECODER_DELAY
+
+    /**
+     * delay/padding Info-кадра (timeline.md, «FR-23, сырые выходы»): delay = hidden − 529,
+     * padding = K·spf − delay − (B − A); тогда длина по LAME K·spf − delay − padding = B − A,
+     * а пропуск декодера delay + 529 = hidden. null — не помещается в 12 бит.
+     */
+    fun infoDelayPaddingOrNull(hidden: Long, length: Long, audioFrames: Int, samplesPerFrame: Int): Mp3InfoParams? {
+        val delay = hidden - MP3_DECODER_DELAY
+        val padding = audioFrames.toLong() * samplesPerFrame - delay - length
+        return if (delay in 0..4095 && padding in 0..4095) Mp3InfoParams(delay.toInt(), padding.toInt()) else null
+    }
+
+    /** То же, с понятной ошибкой, если план не представим тегом LAME (тогда нужен [planFastTrim] с запасным путём). */
+    fun infoDelayPadding(hidden: Long, length: Long, audioFrames: Int, samplesPerFrame: Int): Mp3InfoParams =
+        infoDelayPaddingOrNull(hidden, length, audioFrames, samplesPerFrame) ?: throw IllegalArgumentException(
+            "Тег LAME не может скрыть начало: скрыть нужно $hidden сэмплов (допустимо $MP3_DECODER_DELAY…$MAX_HIDDEN), " +
+                "padding = ${audioFrames.toLong() * samplesPerFrame - (hidden - MP3_DECODER_DELAY) - length} (допустимо 0…4095).")
+
+    /**
+     * Полный план быстрой обрезки MP3 (timeline.md ф. 13 + «FR-23, MP3»):
+     * u_i = i·spf − D; i_a по формуле 13; W = warmupFrames (bit reservoir); hidden = A − u_{i_s}.
+     * Если hidden > 4624 (низкий битрейт: W ≥ 5 кадров по 1152), тег LAME скрыть весь разгон не может —
+     * запасной путь: честный сдвиг начала, как для AC-3/DTS (A = u_{i_s} + 4624: скрыто сколько позволяет тег,
+     * delay = 4095), остальной разгон звучит, и это видно в тексте «Фактическое начало … на N мс раньше выделения».
+     * Конец при этом точный: B и padding считаются по той же формуле.
+     * @param encoderDelay D — пропуск в начале исходника (delay LAME + 529, GaplessProbe), lengthFrames — L.
+     */
+    fun planFastTrim(stream: Mp3Stream, encoderDelay: Long, selStart: Long, selEnd: Long, lengthFrames: Long): Mp3FastTrimPlan {
+        val fr = stream.frames
+        require(fr.isNotEmpty()) { "в файле нет кадров MP3" }
+        val spf = stream.samplesPerFrame
+        val fs = stream.sampleRate
+        val starts = LongArray(fr.size) { it.toLong() * spf - encoderDelay }
+        val lens = IntArray(fr.size) { spf }
+        val probe = FastTrimPlanner.planFull(starts, lens, selStart, selEnd, fs, 0, 0, lengthFrames, true)
+        val w = warmupFrames(fr, probe.firstAudiblePacket)
+        val p = FastTrimPlanner.planFull(starts, lens, selStart, selEnd, fs, w, 0, lengthFrames, true)
+        val k = p.lastPacket - p.firstPacket + 1
+        if (p.hidden <= MAX_HIDDEN) return Mp3FastTrimPlan(p, infoDelayPadding(p.hidden, p.length, k, spf), true)
+        // Запасной путь: hidden = 4624 (delay = 4095), A сдвигается раньше; i_s и B не меняются.
+        val start = starts[p.firstPacket] + MAX_HIDDEN
+        val fb = p.copy(start = start, hidden = MAX_HIDDEN.toLong(), message = FastTrimPlanner.message(selStart, selEnd, start, p.end, fs))
+        val info = infoDelayPadding(fb.hidden, fb.length, k, spf)
+        return Mp3FastTrimPlan(fb, info, false)
+    }
+
+    /** Info-кадр для плана [planFastTrim]: шаблон — первый аудиокадр, объём — копируемые кадры i_s…i_l. */
+    fun buildInfoFrame(stream: Mp3Stream, t: Mp3FastTrimPlan): ByteArray {
+        val sel = stream.frames.subList(t.plan.firstPacket, t.plan.lastPacket + 1)
+        return buildInfoFrame(stream.frames[0].header, sel.size, sel.sumOf { it.size.toLong() }, t.info.delay, t.info.padding)
+    }
+
     /**
      * Кадр Xing/LAME «Info» для сырого .mp3 после быстрой обрезки (timeline.md, «FR-23, сырые выходы»):
      * delay = hidden − 529 (0..4095), padding = K·spf − delay − (B−A) (0..4095). Параметры кадра — как у шаблона,
@@ -193,7 +262,7 @@ object Mp3Scanner {
      */
     fun buildInfoFrame(template: Mp3Header, audioFrames: Int, audioBytes: Long, delay: Int, padding: Int): ByteArray {
         require(template.layer == 3)
-        require(delay in 0..4095) { "delay=$delay вне 0..4095 (LAME 12 бит)" }
+        require(delay in 0..4095) { "delay=$delay вне 0..4095 (LAME 12 бит); используйте planFastTrim — у него есть запасной путь" }
         require(padding in 0..4095) { "padding=$padding вне 0..4095 (LAME 12 бит)" }
         val side = template.sideInfoLength
         val need = 4 + side + 120 + 36

@@ -71,7 +71,7 @@ object ExportPlanner {
         val bits = when (req.format) {
             ExportFormat.WAV -> (req.bits ?: defBits).let { if (it in intArrayOf(16, 24, 32)) it else defBits }
             ExportFormat.FLAC -> (req.bits ?: defBits).let {
-                if (it == 16 || it == 24) it else { notes += "FLAC поддерживает 16 или 24 бит: будет 24 бит."; 24 }
+                if (it == 16 || it == 24) it else { notes += "FLAC поддерживает 16 или 24 бит: будет $defBits бит."; defBits }
             }
             else -> 0
         }
